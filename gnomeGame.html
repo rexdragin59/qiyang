@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Javascript game</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body onload = "startGame()">
+<div>
+	<p style="font-size:40px;">aaaa<mark>mmytHere</mark>dfd</p>
+	<p style="font-size:40px;">aaaa<mark>mmytHere</mark>dfd</p>
+	<button onclick="game.undo()">Undo</button>
+	<p>
+		<canvas id="myCanvas" width="600" height="480" style="border:2 px solid black;"></canvas>
+	</p>
+</div>
+<script>
+
+const CANVAS_WIDTH = 600;
+const CANVAS_HEIGHT = 480;
+var canvas = undefined;
+var ctx = undefined;
+var xMouse = 0;	// mouse coords relative to topleft of canvas
+var yMouse = 700;
+var xCanvas = undefined;
+var yCanvas = undefined;
+const FPS = 60;
+var promises = undefined;
+var img = undefined;
+const BLOCK_SIDE_LENGTH = 32;	// square shaped blocks
+const NUM_ROWS = 8;
+const NUM_COLS = 10;
+const topLeftCoords = {x:10, y:10};
+var bDisplayWinText = false;
+var nFrames = 0;
+
+var COLORS = {RED: 0, YELLOW: 1, BLUE: 2, NONE: 3};	// enum
+gameGrid = [];
+gameStates = [];
+
+// Load image located at filepath
+// Returns a promise whose resolved value is the image
+function load_image(filepath){
+	promise = new Promise(function(resolve, reject){
+		var img = document.createElement("img");
+		img.src = filepath;
+		img.onload = function(){
+			resolve(img);
+		};
+	});
+	return promise;
+}
+
+// Blit a promised image to the canvas
+function apply_image(imgPromise, x, y){
+	imgPromise.then(function(img){
+		ctx.drawImage(img, x, y);
+	});
+}
+
+var game = {
+	// set canvas and create Context
+	
+	setup: function(){
+		canvas = document.getElementById("myCanvas");
+		canvas.width = CANVAS_WIDTH;
+		canvas.height = CANVAS_HEIGHT;
+		ctx = canvas.getContext("2d");
+		canvas.style.width = CANVAS_WIDTH.toString() + "px";
+		canvas.style.height = CANVAS_HEIGHT.toString() + "px";
+		var rect = canvas.getBoundingClientRect();
+		xCanvas = rect.x;
+		yCanvas = rect.y;
+		
+		// handle mouse motion
+		window.addEventListener('mousemove', function(e){
+			xMouse = e.clientX - xCanvas;
+			yMouse = e.clientY - yCanvas;
+		});
+		
+		// handle mouse click
+		window.addEventListener('mousedown', function(e){
+			// erase clicked block (unless clicked isolated block) and neighbors and topple and consolidate
+			var clickedBlockIndices = this.find_clicked_block_index(xMouse, yMouse);
+			if (clickedBlockIndices != undefined)
+			{
+				this.handle_block_click(clickedBlockIndices.x, clickedBlockIndices.y);
+			}
+		}.bind(this));
+		
+		// load gnome blocks of random colors on all grid spaces
+		for(var y = 0; y < NUM_ROWS; ++y)
+		{
+			gameGrid[y] = [];
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				var r = Math.random();
+				if (r < 1.0/3)
+				{
+					gameGrid[y][x] = COLORS.RED;
+				}
+				else if(r < 2.0/3)
+				{
+					gameGrid[y][x] = COLORS.YELLOW;
+				}
+				else
+				{
+					gameGrid[y][x] = COLORS.BLUE;
+				}
+			}
+		}
+	},
+	
+	// x and y are the indices of the clicked block
+	handle_block_click: function(x, y)
+	{
+		// erase clicked block (unless clicked isolated block) and neighbors and topple and consolidate
+		if (gameGrid[y][x] != COLORS.NONE && !this.is_isolated_block(x, y))
+		{
+			this.save_game_state();
+			this.erase_contiguous(x, y, gameGrid[y][x]);
+			this.apply_gravity();
+			this.consolidate_towers();
+		}
+		bDisplayWinText = this.grid_is_empty();
+	},
+	
+	save_game_state: function(){
+		var newIndex = gameStates.length;
+		gameStates[newIndex] = []
+		for(var y = 0; y < NUM_ROWS; ++y)
+		{
+			gameStates[newIndex][y] = [];
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				gameStates[newIndex][y][x] = gameGrid[y][x];
+			}
+		}
+	},
+	
+	run: function(){
+		// execute frame logic and render at a rate of 60 FPS
+		window.setInterval(this.gameLoop.bind(this), 1000/FPS);
+	},
+	
+	// determines whether the block at param indices has no same-color adjacent blocks
+	is_isolated_block: function(xIndex, yIndex){
+		var c = gameGrid[yIndex][xIndex];
+		if (xIndex > 0 && c == gameGrid[yIndex][xIndex-1])
+			return false;
+		if (xIndex < NUM_COLS - 1 && c == gameGrid[yIndex][xIndex+1])
+			return false;
+		if (yIndex > 0 && c == gameGrid[yIndex-1][xIndex])
+			return false;
+		if (yIndex < NUM_ROWS - 1 && c == gameGrid[yIndex+1][xIndex])
+			return false;
+		return true;
+	},
+	
+	// identify clicked block using mouse coords; returns undefined if no block was clicked
+	find_clicked_block_index: function(xmouse, ymouse){
+		for(var y = 0; y < NUM_ROWS; ++y)
+		{
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				var rect = {'x': topLeftCoords.x + x*BLOCK_SIDE_LENGTH,
+							'y': topLeftCoords.y + y*BLOCK_SIDE_LENGTH,
+							'w': BLOCK_SIDE_LENGTH,
+							'h': BLOCK_SIDE_LENGTH};
+				if(xmouse < rect.x)
+					continue;
+				if(ymouse < rect.y)
+					continue;
+				if(xmouse > rect.x + rect.w)
+					continue;
+				if(ymouse > rect.y + rect.h)
+					continue;
+				return {'x':x, 'y': y};
+			}
+		}
+	},
+	
+	// recursively erase all blocks of same param color adjacent to param clicked block
+	erase_contiguous: function(xIndex, yIndex, eraseColor){
+		if (eraseColor != gameGrid[yIndex][xIndex])
+			return;
+		gameGrid[yIndex][xIndex] = COLORS.NONE;
+		if (xIndex > 0)
+			this.erase_contiguous(xIndex-1, yIndex  , eraseColor);
+		if (xIndex < NUM_COLS - 1)
+			this.erase_contiguous(xIndex+1, yIndex  , eraseColor);
+		if (yIndex > 0)
+			this.erase_contiguous(xIndex  , yIndex-1, eraseColor);
+		if (yIndex < NUM_ROWS - 1)
+			this.erase_contiguous(xIndex  , yIndex+1, eraseColor);
+	},
+	
+	// upper blocks fill empty spaces below
+	apply_gravity: function(){
+		for(var movedBlock = true; movedBlock; )	// iterate through grid multiple times until no more blocks fall down
+		{
+			movedBlock = false;
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				for(var y = NUM_ROWS - 2; y >= 0; --y)	// start at bottom so that each tower can move down 1 block
+				{
+					if (gameGrid[y][x] != COLORS.NONE && gameGrid[y+1][x] == COLORS.NONE)
+					{
+						gameGrid[y+1][x] = gameGrid[y][x];
+						gameGrid[y][x] = COLORS.NONE;
+						movedBlock = true;
+					}
+				}	
+			}
+		}
+	},
+	
+	// erase the block with indices (x, y) and consolidate remaining blocks
+	consolidate_towers: function(x, y){
+		for(var movedCol = true; movedCol; )	// iterate through grid multiple times until no more blocks fall down
+		{
+			movedCol = false;
+			for(var x = 0; x < NUM_COLS - 1; ++x)
+			{
+				if (gameGrid[NUM_ROWS-1][x] == COLORS.NONE && gameGrid[NUM_ROWS-1][x+1] != COLORS.NONE)
+				{
+					// move entire column leftward; col x+1 is moved to col x
+					for(var y = 0; y < NUM_ROWS; ++y)
+					{
+						gameGrid[y][x] = gameGrid[y][x+1];
+						gameGrid[y][x+1] = COLORS.NONE;
+					}
+					movedCol = true;
+				}
+			}
+		}
+	},
+	
+	update: function(){
+		// game logic here
+	},
+
+	render: function(){
+		// clear screen
+		ctx.fillStyle = "#802020FF";
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+		// display game grid
+		for(var y = 0; y < NUM_ROWS; ++y)
+		{
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				var blockColor = undefined;
+				if(gameGrid[y][x] == COLORS.RED)
+				{
+					blockColor = "#FF3333";
+				}
+				else if(gameGrid[y][x] == COLORS.YELLOW)
+				{
+					blockColor = "#FFFF33";
+				}
+				else if(gameGrid[y][x] == COLORS.BLUE)
+				{
+					blockColor = "#3333FF";
+				}
+				
+				if (blockColor != undefined)
+				{
+					// render block without border, but click hitbox still contains border
+					ctx.fillStyle = blockColor;
+					ctx.fillRect(topLeftCoords.x + x*BLOCK_SIDE_LENGTH + 1, topLeftCoords.y + y*BLOCK_SIDE_LENGTH + 1, BLOCK_SIDE_LENGTH - 2, BLOCK_SIDE_LENGTH - 2);
+				}
+			}
+		}
+		
+		if (bDisplayWinText)
+		{
+			// draw winning text
+			ctx.font = "30px Courier New";
+			ctx.fillStyle = "#00FFFF";
+			ctx.fillText('You Win!', 0, CANVAS_HEIGHT/2.0);
+		}
+	},
+	
+	grid_is_empty: function(){
+		for(var y = 0; y < NUM_ROWS; ++y)
+		{
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				if (gameGrid[y][x] != COLORS.NONE)
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	},
+	
+	// undo 1 step
+	undo: function(){
+		if (gameStates.length == 0)
+			return;
+		bDisplayWinText = false;
+		gs = gameStates.pop();
+		for(var y = 0; y < NUM_ROWS; ++y)
+		{
+			for(var x = 0; x < NUM_COLS; ++x)
+			{
+				gameGrid[y][x] = gs[y][x];
+			}
+		}
+	},
+	
+	gameLoop: function(){
+		this.update();
+		this.render();
+	},
+};
+
+function startGame(){
+	console.log("game started");
+	game.setup();
+	game.run();
+}
+
+</script>
+</body>
+</html>
