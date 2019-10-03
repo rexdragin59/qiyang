@@ -1,2 +1,2 @@
-# ts2.github.io
+# qiyang.github.io
 My website hosted by github exclusively
