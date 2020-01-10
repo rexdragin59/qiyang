@@ -87,6 +87,19 @@ var game = {
 			}
 		}.bind(this));
 		
+		// handle touch
+		window.addEventListener("touchstart", function(e){
+			let mouse_x = e.touches[0].pageX - xCanvas;
+			let mouse_y = e.touches[0].pageY - yCanvas;
+			
+			// erase blocks
+			var clickedBlockIndices = this.find_clicked_block_index(mouse_x, mouse_y);
+			if (clickedBlockIndices != undefined)
+			{
+				this.handle_block_click(clickedBlockIndices.x, clickedBlockIndices.y);
+			}
+		}.bind(this), false);
+		
 		// load gnome blocks of random colors on all grid spaces
 		for(var y = 0; y < NUM_ROWS; ++y)
 		{
