@@ -459,7 +459,7 @@ vec2.prototype.render_text = function(textStr, colorStr)
 // since console.log(Vertex) doesn't always display correct values
 vec2.prototype.toString = function()
 {
-	return '(('.concat(this.x, ', ', this.y, '); id=', (this.debugId ?? ''), ')');
+	return '(('.concat(this.x, ', ', this.y, '); id=', (this.debugId ? this.debugId : ''), ')');
 }
 
 // only renders debugId text; does NOT render vertex itself
@@ -596,7 +596,7 @@ LineSeg.prototype.render_striped = function(color1Str, color2Str, numStripes = 1
 
 LineSeg.prototype.toString = function()
 {
-	return '( '.concat(this.r1.toString(), ' to ', this.r2.toString(), '; id=', (this.debugId ?? ''), ' )');
+	return '( '.concat(this.r1.toString(), ' to ', this.r2.toString(), '; id=', (this.debugId ? this.debugId : ''), ' )');
 }
 
 // lehmer linear congruential generator
@@ -684,7 +684,7 @@ function get_oscilloscope_xy_offset(seedStr)
 // and render thin lineSeg connecting *this* vector and text location
 vec2.prototype.render_offset_legend_text = function(textStr, colorStr = '#000000FF', offsetVec = undefined)
 {
-	let v2 = this.add(offsetVec ?? new vec2(0, 0));
+	let v2 = this.add(offsetVec ? offsetVec : new vec2(0, 0));
 	v2.render_text(textStr, colorStr);
 
 	const TEXT_LEGEND_LINE_WIDTH = 0.9;
@@ -1736,7 +1736,7 @@ function* gen_id(startIndex = 0, prefix = undefined)
 {
 	for(let i = startIndex; true; ++i)
 	{
-		yield (prefix ?? '').concat(i);
+		yield (prefix ? prefix : '').concat(i);
 	}
 }
 
