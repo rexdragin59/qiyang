@@ -1,1131 +1,202 @@
 <!DOCTYPE html>
 <html>
 <head>
-	<title>Pikmin app</title>
+	<title>audio player app</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body onload = "startGame()">
 <div>
-	<p style="font-size:20px;">Pikmin bring food to destination, navigating walls. Press (p) to toggle game pause, (o) to toggle debugId flail pause, (.) to advance 1 frame, (q, w) to retreat/advance pullstring debugger index, (r, t) to retreat/advance pathfinding debugger index</p>
-	<canvas id="myCanvas" width="600" height="480" style="border:2 px solid black;"></canvas>
-	<p id="mouseCoords">rounded mouse coords: (x, y)</p>
+	<p style="font-size:30px;">audio player</p>
+	<p id="errorMarquee">error: no error</p>
+	<p id="audioPlayingPausedIndicator">Paused state: no audio</p>
+	<p id="audioCurrentTime">&lt;audio current time here&gt;</p>
+	<p id="lastSavedBookmarkPlaying">Saved playing audio timestamp: none</p>
+	<p id="lastSavedBookmark">bookmarks: none</p>
+	
+	<label for="uploadButton">Choose sound to upload: </label>
+	<input id="uploadButton" type="file"></input>
+	<br>
+	
+	<input type="button" value="click to play sound or toggle pause" onclick="on_click_play()" style="width: 300px; height: 60px; border-radius: 0px;"></input>
+	<br>
+	
+	<input type="button" value="<<" style="width:55px; height: 55px;" onclick="seek_relative(-30)"></input>
+	<input type="button" value="<"  style="width:55px; height: 55px;" onclick="seek_relative(-5) "></input>
+	<input type="button" value=">"  style="width:55px; height: 55px;" onclick="seek_relative(+5) "></input>
+	<input type="button" value=">>" style="width:55px; height: 55px;" onclick="seek_relative(+30)"></input>
+	
+	<br>
+	<label for="jumpToTime">Jump to seconds:</label>
+	<input type="text" id="jumpToTime"></input>
+	<input type="submit" id="submitNewTimeStampButton" value="submit!"></input>
+	<br>
+	<input type="button" value="save bookmark" style="height: 35px;" onclick="save_bookmarks_to_storage()"></input>
+	<input type="button" value="reload audio" onclick="if (audio){ audio.load(); }"></input>
+	<p>
+		<canvas id="myCanvas" width="600" height="480" style="border:2 px solid black;"></canvas>
+	</p>
+	
 </div>
 <script>
-// completed Feb 7, 2020
-// updated with a star pathfinding and string pulling on Aug 26, 2021
 
-// Pikmin will each go to their assigned food, pick it up, then move to the food's destination and drop it off
-const CANVAS_WIDTH = 1600;
-const CANVAS_HEIGHT = 2480;
-var canvas = undefined;
-var ctx = undefined;
-var xMouse = 0;	// mouse coords relative to topleft of canvas
-var yMouse = 700;
-var xCanvas = undefined;
-var yCanvas = undefined;
-var gameRunning = false;
-var frame = 0;
-let debugFrame = 0;	// counter separate from 'frame'
-let UNIVERSAL_LINE_WIDTH = 2;
-let debugFlailPaused = false;
-let mustImmediatePause = false;
-let gamePaused = mustImmediatePause || false;
-const MAX_NUM_PIKMIN = 100;
+// Created Feb 16, 2022
+// INSTRUCTIONS:
+// Intended for playing audiobooks while automatically saving the bookmark
+// Load sound file (*.wav, *.mp3, *.ogg, etc.)
+// Then click the play button to play/pause
+// Every 10 seconds, audio (if playing) will automatically save its current time to localStorage.
+// Can also manually save bookmark time by clicking the "save bookmark" button.
+// Click [<<], [<], [>], [>>] to seek to ahead/behind time
+// Can play multiple sound files, and each will have their own bookmark
 
-// adjustable parameters
-const FPS = 60;
-
-const PIKMIN_STATE_FINDING_FOOD = 'PIKMIN_STATE_FINDING_FOOD';
-const PIKMIN_STATE_TRANSPORTING_FOOD = 'PIKMIN_STATE_TRANSPORTING_FOOD';
-const PIKMIN_STATE_HOVERING = 'PIKMIN_STATE_HOVERING';
-
-// constructor
-const PIKMIN_MAX_FAST_SPEED = 3.3;
-const PIKMIN_MIN_FAST_SPEED = 0.6*PIKMIN_MAX_FAST_SPEED;
-function Pikmin(loc, assignedFood, mesh, fastSpeed = PIKMIN_MAX_FAST_SPEED)
+function update_audio_timestamp()
 {
-	this.loc = loc;	// vec2
-	this.assignedFood = assignedFood;	// mutually linked
-	this.activityState = PIKMIN_STATE_FINDING_FOOD;
-	this.mesh = mesh;	// to calculate new path after picking up food
-	this.pathPoly = undefined;	// pikmin moves toward first vertex in this Array; always has >=1 vertex
-	this.framesAfterFinish = -1;	// num frames after finishing delivering food
-	this.fastSpeed = fastSpeed;
+	document.getElementById('audioCurrentTime').innerText = `${audio.currentTime.toFixed(0)} sec / ${audio.duration.toFixed(0)} sec`;
 }
 
-const MAX_HOVER_RADIUS = 18;
-// move all pikmin closer to their assigned [destination/food]
-Pikmin.prototype.update = function(dt = 1)
-{
-	// move toward destination
-	let displacement = this.pathPoly.vertices[0].subtract(this.loc);
-	const PIKMIN_SLOW_SPEED = 0.1;
-	let pikminSpeed = this.activityState == PIKMIN_STATE_FINDING_FOOD ||
-					  this.activityState == PIKMIN_STATE_TRANSPORTING_FOOD ?
-					  this.fastSpeed : PIKMIN_SLOW_SPEED;
-	if (displacement.len_sq() > pikminSpeed*pikminSpeed)
+let audio;
+let audioFileName; // for display purposes only; not for choosing a file!
+let bookmarks;
+let uploadButton = document.getElementById('uploadButton');
+uploadButton.addEventListener('change', function(e){
+	// load bookmark
+	load_bookmarks_from_storage();
+	
+	// delete old audio object if there is a sound file still playing
+	if (audio)
 	{
-		this.loc = this.loc.add(displacement.normalize().mult(pikminSpeed*dt));
+		audio.pause();
 	}
-	else
-	{
-		this.loc = this.pathPoly.vertices[0];		// stop at destination
-		this.pathPoly.vertices.splice(0, 1);	// go to next waypoint
-		if (this.pathPoly.vertices.length == 0)
+	
+	// load audio file
+	let objectURL = URL.createObjectURL(this.files[0]);
+	audioFileName = this.files[0].name;
+	audio = new Audio(objectURL);
+	audio.autoplay = true;	// play as soon as sound is loaded
+	document.getElementById('errorMarquee').innerText = `dispatched loading of ${audioFileName}`;
+	audio.addEventListener('loadeddata', function(){
+		// set initial timestamp
+		document.getElementById('errorMarquee').innerText = `loaded ${audioFileName}`;
+		console.log(`callback for loaded audio ${audioFileName}; duration=${this.duration}`);
+		update_audio_timestamp();
+		update_bookmark_display();
+		let startTime = audioFileName in bookmarks ? bookmarks[audioFileName] : 0;
+		audio.currentTime = startTime;
+		if (startTime > audio.duration)
 		{
-			if (this.activityState == PIKMIN_STATE_FINDING_FOOD)
-			{
-				this.activityState = PIKMIN_STATE_TRANSPORTING_FOOD;
-				this.pathPoly = this.mesh.pull_a_star_string(this.loc, this.assignedFood.dst, pullStringDebugger);	// recalculate pulled string a-star path
-			}
-			else if(this.activityState == PIKMIN_STATE_TRANSPORTING_FOOD || this.activityState == PIKMIN_STATE_HOVERING)
-			{
-				if (this.activityState == PIKMIN_STATE_TRANSPORTING_FOOD){
-					this.activityState = PIKMIN_STATE_HOVERING;
-				}
-				this.pathPoly.vertices.push(get_random_point_inside_circle(this.assignedFood.dst, MAX_HOVER_RADIUS));
-			}
-		}
-		
-		let t = displacement.len()/pikminSpeed;
-		this.update(dt - t);	// walk remainder of timestep
-	}
-		
-	if (this.activityState == PIKMIN_STATE_HOVERING){
-		this.framesAfterFinish += dt;
-	}
-}
-
-const PIKMIN_HEIGHT = 9;
-Pikmin.prototype.render = function(pathColorStr)
-{
-	const PIKMIN_WIDTH = 5;
-	const PIKMIN_COLOR = '#FF0000';
-	ctx.fillStyle = PIKMIN_COLOR;
-	ctx.fillRect(this.loc.x - PIKMIN_WIDTH/2, this.loc.y - PIKMIN_HEIGHT, PIKMIN_WIDTH, PIKMIN_HEIGHT);
-	
-	// render debug path from each pikmin to its current destination
-	const MUST_RENDER_PIKMIN_PATH = false;
-	if (MUST_RENDER_PIKMIN_PATH)
-	{
-		const PATH_COLOR = '#00FF00';
-		if (this.pathPoly.vertices.length > 0)
-		{
-			new LineSeg(this.loc, this.pathPoly.vertices[0]).render(PATH_COLOR);
-			this.pathPoly.render_open(PATH_COLOR);
-		}
-	}
-}
-
-// for rendering order; smaller z means rendered earlier
-Pikmin.prototype.get_z = function()
-{
-	return this.loc.y;
-}
-
-Pikmin.get_travel_dist = function(pathPoly)
-{
-	if (pathPoly.vertices.length < 2){
-		throw 'cannot compute travel distance of path polygon with <2 points';
-	}
-	
-	let totalDist = 0;
-	for(let i = 0; i < pathPoly.vertices.length-1; ++i)
-	{
-		totalDist += pathPoly.vertices[i].subtract(pathPoly.vertices[i+1]).len();
-	}
-	return totalDist;
-}
-
-// constructor
-function Food(src, dst, assignedPik)
-{
-	this.src = src;	// vec2
-	this.dst = dst;	// vec2
-	this.assignedPik = assignedPik;
-}
-
-Food.prototype.render = function()
-{
-	const FOOD_WIDTH = 4;
-	const FOOD_HEIGHT = 5;
-	const FOOD_PIKMIN_GAP = 1.5;
-	const FOOD_COLOR = '#FFFF00';
-	ctx.fillStyle = FOOD_COLOR;
-	
-	let loc;
-	if (this.assignedPik.activityState == PIKMIN_STATE_FINDING_FOOD)
-	{
-		loc = this.src;
-	}
-	else if (this.assignedPik.activityState == PIKMIN_STATE_TRANSPORTING_FOOD)
-	{
-		loc = this.assignedPik.loc.add(new vec2(0, -PIKMIN_HEIGHT - FOOD_PIKMIN_GAP));
-	}
-	else	// this.assignedPik.activityState == PIKMIN_STATE_HOVERING
-	{
-		loc = this.dst;
-	}
-	ctx.fillRect(loc.x - FOOD_WIDTH/2, loc.y - FOOD_HEIGHT/2, FOOD_WIDTH, FOOD_HEIGHT);
-}
-
-// depth buffer for rendering
-Food.prototype.get_z = function()
-{
-	return this.assignedPik.activityState == PIKMIN_STATE_FINDING_FOOD ||
-		   this.assignedPik.activityState == PIKMIN_STATE_TRANSPORTING_FOOD ? this.assignedPik.loc.y : this.dst.y;
-}
-
-get_random_point_inside_circle = function(center, radius)
-{
-	let r = Math.random()*radius;
-	let theta = Math.random()*2*Math.PI;
-	return new vec2(Math.cos(theta)*r + center.x, Math.sin(theta)*r + center.y);
-}
-
-get_random_point_inside_polygon_and_circle = function(polygon, center, radius)
-{
-	const MAX_ATTEMPTS = 10000;
-	for(let i = 0; i < MAX_ATTEMPTS; ++i)
-	{
-		let point = this.get_random_point_inside_circle(center, radius);
-		if (polygon.contains_point(point)){
-			return point;
-		}
-	}
-	throw 'could not find point inside polygon and circle within maximum number of attempts';
-}
-
-function Swarm(undefined)
-{
-	this.pikmins = [];
-	this.foods = [];
-}
-let swarm = new Swarm();
-
-Swarm.prototype.random_point_inside_one_polygon = function()
-{
-	return this.wallPolygons[Math.floor(Math.random()*this.wallPolygons.length)].get_random_point_inside();
-}
-	
-
-// load starting positions of all food and pikmin
-// also assign each pikmin to one food
-Swarm.prototype.load = function(wallPolygons)
-{
-	if (wallPolygons.length == 0)
-	{
-		throw 'cannot have empty wall polygons';
-	}
-	this.wallPolygons = wallPolygons;
-	
-	this.mesh = Mesh.from_simple_polygons(wallPolygons);
-	this.pikminNestLoc = new vec2(128, 409, 'pikminNest');
-	//let foodDstPolygon = wallPolygons[Math.floor(Math.random()*wallPolygons.length)];
-	//let foodDst = foodDstPolygon.get_random_point_inside();
-	
-	// maximum ~2000 pikmin without lag
-	for(let i = 0; i < Math.floor(MAX_NUM_PIKMIN/2); ++i){
-		//this.add_pikmin_food_pair(this.pikminNestLoc, this.random_point_inside_one_polygon(), this.pikminNestLoc);
-		this.add_pikmin_food_pair(this.pikminNestLoc, new vec2(550, 350), this.pikminNestLoc);
-	}
-	
-	const NUM_ANNEAL_OPTIMIZATIONS = 0;
-	new Array(NUM_ANNEAL_OPTIMIZATIONS).fill(0).forEach(x => this.shuffle_optimize_assignments(this.mesh));
-}
-
-// links pikmin and food and pushes to this.pikmins and this.foods
-Swarm.prototype.add_pikmin_food_pair = function(pikminLoc, foodLoc, foodDst)
-{
-	if (this.pikmins.length < MAX_NUM_PIKMIN)
-	{
-		let food = new Food(foodLoc, foodDst, undefined);
-		let pikminFastSpeed = lerp(PIKMIN_MIN_FAST_SPEED, PIKMIN_MAX_FAST_SPEED, Math.random());
-		let pik = new Pikmin(pikminLoc, undefined, this.mesh, pikminFastSpeed);
-		pik.pathPoly = this.mesh.pull_a_star_string(pik.loc, food.src, pullStringDebugger);
-		pathfindingDebugger.add_step(pik.pathPoly.vertices, 'pulled string mnopq');
-		
-		pik.assignedFood = food;
-		food.assignedPik = pik;
-		this.pikmins.push(pik);
-		this.foods.push(food);
-	}
-}
-
-// total straight-line distance between every pikmin and its assigned food
-//	  does NOTinclude dist between food src and food dst
-//    to be called ONLY before any pikmin moves
-Swarm.prototype.get_total_cost = function()
-{
-	return this.pikmins.reduce((accum, pik) => Pikmin.get_travel_dist(pik.pathPoly)+accum, 0);
-}
-
-// simulated annealing
-Swarm.prototype.shuffle_optimize_assignments = function(mesh)
-{
-	// probability of accepting a random swap that changes cost by deltaCost
-	function P(deltaCost, T){
-		if (deltaCost < 0){
-			return 1;
-		}
-		return Math.exp(-deltaCost/T);
-	}
-	
-	
-	const NUM_SWAPS = 250;	// only perform 2-swaps; global minima not accessible via greedy 2-swaps are accessed through temperature of annealing
-	const FINAL_TEMPERATURE_PROPORTION = 0.001;
-	const DECAY_RATE = Math.pow(FINAL_TEMPERATURE_PROPORTION, 1/NUM_SWAPS);	// final temperature is FINAL_TEMPERATURE_PROPORTION of original temperature, after all steps
-	let totalDeltaCost = 0;
-	let T = this.get_total_cost()/this.pikmins.length/3;
-	for (i = 0; i < NUM_SWAPS; ++i){
-		T *= DECAY_RATE;
-		// chose 2 random distinct indices
-		let i1 = Math.floor(Math.random()*this.pikmins.length);
-		let i2 = i1;
-		while (i2 == i1){
-			i2 = Math.floor(Math.random()*this.pikmins.length);
-		}
-		
-		let d1  = Pikmin.get_travel_dist(this.pikmins[i1].pathPoly);
-		let d2  = Pikmin.get_travel_dist(this.pikmins[i1].pathPoly);
-		let polyNew1 = mesh.pull_a_star_string(this.pikmins[i1].loc, this.pikmins[i2].assignedFood.src);
-		let polyNew2 = mesh.pull_a_star_string(this.pikmins[i2].loc, this.pikmins[i1].assignedFood.src);
-		let d1p = Pikmin.get_travel_dist(polyNew1);
-		let d2p = Pikmin.get_travel_dist(polyNew2);
-		
-		let deltaCost = d1p + d2p - d1 - d1;
-		if (Math.random() < P(deltaCost, T))
-		{
-			// swap
-			let pik1 = this.pikmins[i1];
-			let pik2 = this.pikmins[i2];
-			let food1 = this.pikmins[i1].assignedFood;
-			let food2 = this.pikmins[i2].assignedFood;
-			pik1.assignedFood = food2;
-			pik2.assignedFood = food1;
-			food1.assignedPik = pik2;
-			food2.assignedPik = pik1;
-			pik1.pathPoly = polyNew1;
-			pik2.pathPoly = polyNew2;
-			totalDeltaCost += deltaCost;
-		}
-	}
-	console.log('after', NUM_SWAPS, 'swaps, saved ~', (-totalDeltaCost/this.pikmins.length).toFixed(2), 'distance per pikmin');
-}
-
-Swarm.prototype.update = function(frame)
-{
-	this.pikmins.forEach(pik => pik.update());
-	
-	// delete pikmin that have been hovering for a while
-	const MAX_HOVER_FRAMES = 1;
-	this.pikmins.filter(pik => pik.framesAfterFinish >= MAX_HOVER_FRAMES).forEach(pik => {
-		let pikIndex = this.pikmins.indexOf(pik);
-		if (pikIndex == -1)
-		{
-			throw 'cannot find dead pikmin';
-		}
-		let foodIndex = this.foods.indexOf(pik.assignedFood);
-		if (foodIndex == -1)
-		{
-			throw 'cannot find dead pikmin\'s dead food';
-		}
-		this.pikmins.splice(pikIndex, 1);
-		this.foods.splice(foodIndex, 1);
-	});
-	
-	// add new pikmin
-	const NUM_FRAMES_PER_NEW_FOOD = 6;
-	if (frame % NUM_FRAMES_PER_NEW_FOOD == 0)
-	{
-		this.add_pikmin_food_pair(this.pikminNestLoc, this.random_point_inside_one_polygon(), this.pikminNestLoc);
-	}
-}
-
-Swarm.prototype.render = function()
-{
-	// render in order of increasing y (== z_order)
-	let zz = this.pikmins.concat(this.foods).sort((a, b) => a.get_z() - b.get_z());
-	zz.forEach(elem => elem.render());
-	
-	// render pikmin nest
-	ctx.fillStyle = 'green';
-	ctx.strokeStyle = 'black';
-	ctx.beginPath();
-	ctx.arc(this.pikminNestLoc.x, this.pikminNestLoc.y, 15.1, 0, 2*Math.PI);
-	ctx.fill();
-	ctx.stroke();
-}
-
-// constructor
-function vec2(x, y, debugId = undefined){
-	this.x = x;
-	this.y = y;
-	this.debugId = debugId;
-}
-
-// returns new vec2
-vec2.prototype.subtract = function(v)
-{
-	return new vec2(this.x - v.x, this.y - v.y);
-}
-
-// returns new vec2
-vec2.prototype.normalize = function()
-{
-	let len = this.len();
-	if (len == 0.0)
-	{
-		throw 'cannot normalize zero vector';
-	}
-	return this.mult(1/len);
-}
-
-// returns new vec2
-vec2.prototype.add = function(v)
-{
-	return new vec2(this.x + v.x, this.y + v.y);
-}
-
-// returns new vec2
-vec2.prototype.mult = function(c)
-{
-	return new vec2(this.x*c, this.y*c);
-}
-
-vec2.prototype.len = function()
-{
-	return Math.sqrt(this.len_sq());
-}
-
-vec2.prototype.len_sq = function()
-{
-	return vec2.dot(this, this);
-}
-
-vec2.dot = function(v1, v2)
-{
-	return v1.x*v2.x + v1.y*v2.y;
-}
-
-// 2d scalar cross product
-vec2.cross = function(v1, v2)
-{
-	return v1.x*v2.y - v2.x*v1.y;
-}
-
-// args are vec2 objects
-// returns boolean
-vec2.MIN_SIN = 1e-9;
-// will throw error in vec2.normalize if zero vector is one of the args
-vec2.is_parallel = function(v1, v2){
-	let v1n = v1.normalize();
-	let v2n = v2.normalize();
-	return Math.abs( vec2.cross(v1n, v2n) ) < vec2.MIN_SIN;	// normalize first to minimize influence of vector length on parallel result
-	// ERROR PREVIOUSLY HERE: crossProd(v1, v2) == zero if parallel vectors OR if one (or both) vectors have very small length
-}
-
-vec2.MIN_VEC_LEN = 1e-9;
-vec2.is_same_loc = function(v1, v2)
-{
-	// hopefully more robust against floating point error than [(v1-v2).len_sq() == 0]
-	return v1.subtract(v2).len_sq() < vec2.MIN_VEC_LEN*vec2.MIN_VEC_LEN;
-}
-
-vec2.VERTEX_RADIUS = 4;
-vec2.prototype.render_solid = function(colorStr, radius = vec2.VERTEX_RADIUS)
-{
-	ctx.fillStyle = colorStr;
-	ctx.beginPath();
-	ctx.arc(this.x, this.y, radius, 0, 2*Math.PI);
-	ctx.fill();
-}
-
-vec2.prototype.render_ring = function(colorStr, radius = vec2.VERTEX_RADIUS)
-{
-	ctx.strokeStyle = colorStr;
-	ctx.beginPath();
-	ctx.arc(this.x, this.y, radius, 0, 2*Math.PI);
-	ctx.stroke();
-}
-
-// render text at arg world coords
-vec2.prototype.render_text = function(textStr, colorStr)
-{
-	ctx.fillStyle = colorStr;
-	ctx.fillText(textStr, this.x, this.y);
-}
-
-// since console.log(Vertex) doesn't always display correct values
-vec2.prototype.toString = function()
-{
-	return '(('.concat(this.x, ', ', this.y, '); id=', (this.debugId ? this.debugId : ''), ')');
-}
-
-// only renders debugId text; does NOT render vertex itself
-// appendSeed can be non-undefined to distinguis between different contexts of the same vec2. Ex: a vertex shared among multiple Polygons
-//     doesn't affect displayed text
-vec2.prototype.render_debug_id = function(colorStr, appendSeed)
-{
-	if (appendSeed == undefined)
-	{
-		appendSeed = '';
-	}
-	this.render_offset_legend_text(this.debugId, colorStr, get_legend_offset(this.debugId.toString().concat(appendSeed)));
-}
-
-// returns boolean whether v is in the region thetaStart <= thetaV <= thetaEnd
-// requires that cross(startV, endV) >= 0; that the interval from thetaStart to thetaEnd is no more than pi radians
-// Ex: start = 0, end = pi/2, then 0 <= v <= pi/2 iff return true
-// Ex: start = pi/2, end = 0, then pi/2 <= v <= 2pi iff return true
-vec2.is_sandwiched = function (startV, v, endV)
-{
-	return vec2.cross(startV, v) >= 0 && vec2.cross(v, endV) >= 0;
-}
-
-// constructor
-function LineSeg(r1, r2, debugId = undefined)
-{
-	this.r1 = r1;
-	this.r2 = r2;
-	this.debugId = debugId;
-}
-
-// renderSolid is boolean
-LineSeg.prototype.render = function(colorStr, radius = undefined, renderSolid = true)
-{
-	ctx.strokeStyle = colorStr;
-	ctx.beginPath();
-	ctx.moveTo(this.r1.x, this.r1.y);
-	ctx.lineTo(this.r2.x, this.r2.y);
-	ctx.stroke();
-	if (radius != undefined)
-	{
-		if (renderSolid)
-		{			
-			this.r1.render_solid(colorStr, radius);
-			this.r2.render_solid(colorStr, radius);
+			console.log(`bookmarked time (${startTime} sec) > audio duration(${audio.duration} sec); audio will play from beginning`);
 		}
 		else
 		{
-			this.r1.render_ring(colorStr, radius);
-			this.r2.render_ring(colorStr, radius);
+			console.log(`audio timestamp set to ${audio.currentTime} sec from ${startTime} sec`);
+		}
+	}.bind(audio));
+}.bind(uploadButton));
+
+// update HTML only; no hidden operations performed in this function
+function update_bookmark_display()
+{
+	document.getElementById('lastSavedBookmark').innerText = `last saved bookmark: ${JSON.stringify(bookmarks)}`;
+	document.getElementById('lastSavedBookmarkPlaying').innerText = `last saved bookmark of current book:\n${audioFileName}\n@ ${Math.floor(bookmarks[audioFileName])} / ${Math.floor(audio.duration)} sec`;
+}
+
+const AUDIO_KEY = 'audioBookmark';
+// populates global 'bookmarks' dictionary (Object) such that bookmark[<audio file name>] == Audio.currentTime
+// if cannot load from localStorage (or loaded bookmark is invalid), then bookmark becomes empty Object{}
+function load_bookmarks_from_storage()
+{
+	let str = localStorage.getItem(AUDIO_KEY);
+	bookmarks = {};
+	if (str != null)
+	{
+		bookmarks = JSON.parse(str);
+		for(let audioName in bookmarks)
+		{
+			if (!isFinite(bookmarks[audioName]))
+			{
+				bookmarks[audioName] = 0;	// set each invalid .currentTime to 0
+			}
 		}
 	}
+	console.log(`loaded ${str} from storage`);
 }
 
-// render positive&negative [sawtooth wave with arg num periods], similar to sin wave, along *this* LineSeg to distinguish from other collinear line segs
-// nPeriods is positive integer or positive half-[odd integer]
-// amplitude radio is amplitude/lineSegLength
-LineSeg.prototype.render_saw = function(colorStr = '#000000FF', nPeriods = 10, amplitudeRatio = 1/35.4, vertexRadius1 = undefined, vertexRadius2 = undefined){
-	const lineDirec = this.r2.subtract(this.r1);
-	if (amplitudeRatio == undefined){
-		amplitudeRatio = lineDirec.len()/35.4;
-	}
-	normal = lineDirec.mult(amplitudeRatio);	// euclidean length == amplitude
-	normal = new vec2(normal.y, -normal.x);
-	
-	const SAW_START_PROGRESS = 0.1;	// begin sawtooth at a distance from vertex, to display correct lineseg angle near vertex
-	let nHumps = Math.floor(2*nPeriods);
-	let progressArr = new Array(nHumps).fill(0).map( (val, index) => (index+0.5)/nHumps*(1-2*SAW_START_PROGRESS)+SAW_START_PROGRESS );	// linearly interpolate [evenly-distributed progress] between (SAW_START_PROGRESS) and (1-SAW_START_PROGRESS)
-	
-	ctx.strokeStyle = colorStr;
-	ctx.beginPath();
-	ctx.moveTo(this.r1.x, this.r1.y);
-	let vSawStart = lineDirec.mult(SAW_START_PROGRESS).add(this.r1);
-	ctx.lineTo(vSawStart.x, vSawStart.y);
-	for(let i = 0; i < progressArr.length; ++i)
+function save_bookmarks_to_storage()
+{
+	bookmarks[audioFileName] = audio.currentTime;
+	let str = JSON.stringify(bookmarks);
+	localStorage.setItem(AUDIO_KEY, str);
+	console.log(`saved ${str} to storage`);
+	update_bookmark_display();
+}
+
+let hasStartedPlaying = false;
+function on_click_play()
+{
+	if (audio)
 	{
-		let v = lineDirec.mult(progressArr[i]).add(this.r1).add(normal.mult(i % 2 == 0 ? 1 : -1));
-		ctx.lineTo(v.x, v.y);
-	}
-	let vSawEnd = lineDirec.mult(1-SAW_START_PROGRESS).add(this.r1);
-	ctx.lineTo(vSawEnd.x, vSawEnd.y);
-	ctx.lineTo(this.r2.x, this.r2.y);
-	ctx.stroke();
-	
-	if (vertexRadius1 != undefined)
-	{
-		this.r1.render_ring(colorStr, vertexRadius1);
-		if (vertexRadius2 != undefined){
-			this.r2.render_ring(colorStr, vertexRadius2);
-		}else{
-			this.r2.render_ring(colorStr, vertexRadius1);
+		if (!hasStartedPlaying)
+		{
+			// first time playing audio
+			audio.play();
+			hasStartedPlaying = true;
+			console.log(`started playing from ${audio.currentTime} sec`);
 		}
-	}
-}
-
-// ONLY render arrow in middle of lineSeg; don't render lineSeg nore endpoints
-LineSeg.prototype.render_directed = function(colorStr)
-{
-	this.render(colorStr);
-	this.render_arrow(colorStr);
-}
-
-// draws lineSeg and arrow ONLY
-// render arrow endpoints at [(-0.5, 1), (0.5, 0), (-0.5, -1)] relative to center, in units of normal, where forward is (1, 0)
-const NORMAL_OFFSET_SCALE = 0.11;	// length of projection onto normal relative to lineSeg length
-LineSeg.prototype.render_arrow = function(colorStr)
-{
-	const CENTER_PARAM = 0.68;
-	let center = this.r1.mult(1-CENTER_PARAM).add(this.r2.mult(CENTER_PARAM));	// lerped between r1 and r2
-	let direc = this.r2.subtract(this.r1).mult(NORMAL_OFFSET_SCALE);
-	let normal = new vec2(-direc.y, direc.x);
-	let arrowTip = center.add(direc);
-	let side1 = center.subtract(direc).subtract(normal);
-	let side2 = center.subtract(direc).add(normal);
-	
-	ctx.strokeStyle = colorStr;
-	ctx.beginPath();
-	ctx.moveTo(   side1.x,    side1.y);
-	ctx.lineTo(arrowTip.x, arrowTip.y);
-	ctx.lineTo(   side2.x,    side2.y);
-	ctx.stroke();
-}
-
-LineSeg.prototype.render_striped = function(color1Str, color2Str, numStripes = 10)
-{
-	let lineDirec = this.r2.subtract(this.r1);
-	for(let i = 0; i < numStripes; ++i)
-	{
-		let startV = lineDirec.mult( i   /numStripes).add(this.r1);
-		let endV   = lineDirec.mult((i+1)/numStripes).add(this.r1);
-		new LineSeg(startV, endV).render(i % 2 == 0 ? color1Str : color2Str);
-	}
-}
-
-LineSeg.prototype.toString = function()
-{
-	return '( '.concat(this.r1.toString(), ' to ', this.r2.toString(), '; id=', (this.debugId ? this.debugId : ''), ' )');
-}
-
-// lehmer linear congruential generator
-// returns nArgs psuedorandom numbers uniformly distributed in [0, 1)
-// m is prime, and multiplier is largest int (mod m) with largest multiplicative order mod m
-// by design, seed is coprime to RNG_MOD
-const RNG_MULTIPLIER = 134;
-const RNG_MOD = 137;
-const RNG_OFFSET = 8;	// 2^RNG_OFFSET > RNG_MOD
-function rng(seedStr, nArgs = 1)
-{
-	if (nArgs <= 0){
-		throw 'cannot generate non-positive quantity of random numbers';
-	}
-	
-	// convert seedStr to hash mod RNG_MOD
-	let powMod = 1;
-	let hash = seedStr.charCodeAt(0);
-	for(let i = 1; i < seedStr.length; ++i)
-	{
-		powMod = (128*powMod) % RNG_MOD;
-		hash += seedStr.charCodeAt(i)*powMod;	// hash = s[0] + s[1]*128^1 + s[2]*128^2 + s[3]*128^3 + ... + s[n]*128^n (mod RNG_MOD)
-		// each step multiplies by 128 because alphabet ascii is in range [32, 126]
-	}
-	let x = hash % RNG_MOD;	// seed
-	
-	// offset a fixed number of terms in order to countert initial predictability
-	for(let i = 0; i < RNG_OFFSET; ++i){
-		x = x*RNG_MULTIPLIER % RNG_MOD;
-	}
-	
-	let rNums = [];
-	for(let i = 0; i < nArgs; ++i){
-		x = x*RNG_MULTIPLIER % RNG_MOD;
-		rNums.push(x);
-	}
-	
-	return rNums.map(x => x/RNG_MOD);
-}
-
-function lerp(a, b, x)
-{
-	return a*(1-x) + b*x;
-}
-
-// compute pseudorandom random const-length vector seeded by seedStr, oscillating in angle via two sinusoids, based on current frame
-// returns vec2
-const LEGEND_OFFSET_DIST = 38;
-function get_legend_offset(seedStr)
-{
-	const MIN_OMEGA_1 = 0.006;
-	const MAX_OMEGA_1 = 0.007;
-	const MIN_OMEGA_2 = 0.011;
-	const MAX_OMEGA_2 = 0.012;
-	let [r1, r2, r3, r4] = rng(seedStr, 4);
-	let [w1, w2, phi1, phi2] = [lerp(MIN_OMEGA_1, MAX_OMEGA_1, r1), lerp(MIN_OMEGA_2, MAX_OMEGA_2, r2), lerp(0, 2*Math.PI, r3), lerp(0, 2*Math.PI, r4)];
-	let theta = lerp(0, 2*Math.PI, 0.5*(Math.sin(w1*debugFrame + phi1) + Math.sin(w2*debugFrame + phi2)) + 1);
-	return new vec2(Math.cos(theta), Math.sin(theta)).mult(LEGEND_OFFSET_DIST);
-}
-
-// compute random rgb (100% opaque) based on seed String
-// returns CSS color string
-// alpha in range [0, 1]
-function get_seeded_color(seedStr, alpha = 1.0)
-{
-	let [x1, x2, x3] = rng(seedStr.toString(), 3);
-	return 'rgba('.concat(x1*256, ', ', x2*256, ', ', x3*256, ', ', alpha, ')');
-}
-
-// compute pseudorandom parametric curve's position vector seeded by seedStr; x=cos(w1*t), y=sin(w2*t); similar to oscilloscope xy mode
-// returns vec2
-const OSCILLOSCOPE_DIST = 3.2;
-function get_oscilloscope_xy_offset(seedStr)
-{
-	const MIN_OMEGA_1 = 0.046;
-	const MAX_OMEGA_1 = 0.057;
-	const MIN_OMEGA_2 = 0.041;
-	const MAX_OMEGA_2 = 0.062;
-	let [r1, r2, r3, r4] = rng(seedStr, 4);
-	let [w1, w2, phi1, phi2] = [lerp(MIN_OMEGA_1, MAX_OMEGA_1, r1), lerp(MIN_OMEGA_2, MAX_OMEGA_2, r2), lerp(0, 2*Math.PI, r3), lerp(0, 2*Math.PI, r4)];
-	return new vec2(Math.cos(w1*debugFrame + phi1), Math.sin(w2*debugFrame + phi2)).mult(OSCILLOSCOPE_DIST);
-}
-
-// render text offset by offsetVec (in onscreen pixel coords)
-// and render thin lineSeg connecting *this* vector and text location
-vec2.prototype.render_offset_legend_text = function(textStr, colorStr = '#000000FF', offsetVec = undefined)
-{
-	let v2 = this.add(offsetVec ? offsetVec : new vec2(0, 0));
-	v2.render_text(textStr, colorStr);
-
-	const TEXT_LEGEND_LINE_WIDTH = 0.9;
-	ctx.lineWidth = TEXT_LEGEND_LINE_WIDTH;
-	new LineSeg(this, v2).render(colorStr);
-	ctx.lineWidth = UNIVERSAL_LINE_WIDTH;
-};
-
-// render debugId and midpoint ONLY; do not render endpoints nor lineSeg
-// appendSeed doesn't affect displayed text
-LineSeg.prototype.render_debug_id = function(colorStr = '#000000FF', appendSeed)
-{
-	if (appendSeed == undefined)
-	{
-		appendSeed = '';
-	}
-	
-	let mid = this.r1.add(this.r2).mult(0.5);
-	const lineDirec = this.r2.subtract(this.r1);
-	if (vec2.is_same_loc(lineDirec, new vec2(0, 0)))	// if lineSeg is single point, then no normal line segment jutting out
-	{
-		mid.render_text(this.debugId, colorStr);
+		else
+		{
+			// not first time playing audio
+			if (audio.paused)
+			{
+				audio.play();
+			}
+			else
+			{
+				audio.pause();
+			}
+		}
+		document.getElementById('audioPlayingPausedIndicator').innerText = 'Audio paused? '.concat(audio.paused ? 'yes' : 'no');
 	}
 	else
 	{
-		const MIDPOINT_RADIUS = 3.5;
-		mid.render_solid(colorStr, MIDPOINT_RADIUS);
-		mid.render_offset_legend_text(this.debugId, colorStr, get_legend_offset(this.debugId.toString().concat(appendSeed)));
+		console.log('cannot play audio if no audio loaded!');
 	}
 }
 
-// return new lineSeg
-LineSeg.prototype.reverse = function()
+// jump to time button
+document.getElementById('submitNewTimeStampButton').addEventListener('click', e => {
+	let str = document.getElementById('jumpToTime').value;
+	document.getElementById('jumpToTime').value = '';  // clear text to prevent clicking again accidentally
+	let t = Number(str);
+	if (!isNaN(t) && audio)
+	{
+		audio.currentTime = t;
+		console.log(`jumped to time: ${t} sec`);
+	}
+});
+
+// skips ahead (deltaDesconds > 0) or behind (deltaSeconds < 0)
+function seek_relative(deltaSeconds)
 {
-	return new LineSeg(this.r2, this.r1, 'rev_'.concat(this.debugId));
-}
-
-// constructor
-function Polygon(vertices, debugId = undefined)
-{
-	this.vertices = vertices;
-	this.debugId  = debugId;
-}
-
-// recreates Polygon object from JSON.stringify(Polygon)
-Polygon.from_string = function(src)
-{
-	let poly = JSON.parse(src);
-	return new Polygon(poly.vertices.map(v => new vec2(v.x, v.y, v.debugId)), poly.debugId);
-}
-
-// prints Polygon object as JSON string
-Polygon.prototype.export_string = function()
-{
-	console.log('\''.concat(JSON.stringify(this), '\';'));
-}
-
-// returns Array of simple polygons that may share edges/vertices
-// src is {polygons: <Array of JSON-stringified Polygon>, verticesDict: }
-//     .verticesDict[vec2.debugId] = vec2
-Polygon.import_polygons_from_string = function(src)
-{
-	let srcObj = JSON.parse(src);
-	
-	// populate vertices dictionary
-	let verticesDict = {};
-	srcObj.polygons.forEach(p => {
-		p.vertices.forEach(v => {
-			verticesDict[v.debugId] = new vec2(v.x, v.y, v.debugId);
-		});
-	});
-	
-	// create polygons using existing vertices
-	let polygons = srcObj.polygons.map(p => {
-		let vertices = p.vertices.map(v => verticesDict[v.debugId]);
-		return new Polygon(vertices, p.debugId);
-	});
-	return polygons;
-}
-
-
-// render all solid vertices and connecting line segs
-Polygon.prototype.render_internal = function(mustCloseEnd, fillColorStr, strokeColorStr = undefined, radius = undefined)
-{
-	if (this.vertices.length < 2){
-		return;
-	}
-	if (this.vertices.length == 2 && strokeColorStr != undefined){
-		new LineSeg(this.vertices[0], this.vertices[1]).render(strokeColorStr);
-		return;
-	}
-	
-	if (fillColorStr != undefined || strokeColorStr != undefined)
+	if (audio)
 	{
-		const endIndex = this.vertices.length + (mustCloseEnd ? 1 : 0);
-		ctx.beginPath();
-		ctx.moveTo(this.vertices[0].x, this.vertices[0].y);
-		for(let i = 1; i < endIndex; ++i)
-		{
-			let i1 = i % this.vertices.length;
-			ctx.lineTo(this.vertices[i1].x, this.vertices[i1].y);
-		}
-		
-		if (fillColorStr != undefined)
-		{
-			ctx.fillStyle = fillColorStr;
-			ctx.fill();
-		}
-		if (strokeColorStr != undefined)
-		{
-			ctx.strokeStyle = strokeColorStr;
-			ctx.stroke();
-			if (radius != undefined)
-			{
-				this.vertices.forEach(v => v.render_solid(strokeColorStr, radius));
-			}
-		}
+		audio.currentTime += deltaSeconds;
+		update_audio_timestamp();
 	}
 }
 
-
-// render all solid vertices and connecting line segs
-Polygon.prototype.render = function(fillColorStr, strokeColorStr, radius)
-{
-	this.render_internal(true, fillColorStr, strokeColorStr, radius)
-}
-
-// render all solid vertices and connecting line segs, but doesn't close final line segment
-Polygon.prototype.render_open = function(strokeColorStr, radius)
-{
-	this.render_internal(false, undefined, strokeColorStr, radius)
-}
-
-// render debug id of this polygon at polygon center, and render line from center to each vertex
-Polygon.prototype.render_debug_id = function(colorStr, radius)
-{
-	let center = this.get_center();
-	center.render_solid(colorStr, radius);
-	center.render_offset_legend_text(this.debugId, colorStr, get_legend_offset(this.debugId.toString()));
-	const THIN_LINE_WIDTH = 1.1;
-	ctx.lineWidth = THIN_LINE_WIDTH;
-	this.vertices.forEach(v => new LineSeg(v, center).render(colorStr));
-	ctx.lineWidth = UNIVERSAL_LINE_WIDTH;
-}
-
-// render debugIds ONLY; do not render polygon vertices nor polygon lineSegs nor polygon fill
-Polygon.prototype.render_debug_ids = function(colorStr = '#DD00CCFF')
-{
-	for(let v of this.vertices)
-	{
-		v.render_debug_id(colorStr, this.debugId);
-	}
-}
-
-Polygon.prototype.assign_debug_ids = function(id_generator = undefined)
-{
-	if (id_generator == undefined)
-	{
-		id_generator = gen_id(0);
-	}
-
-	for(let v of this.vertices)
-	{
-		v.debugId = id_generator.next().value;
-	}
-}
-
-// returns Booleans whether polygon has 2 or more same-location point
-Polygon.prototype.has_duplicate_vertices = function()
-{
-	for(let i = 0; i < this.vertices.length; ++i)
-	{
-		for(let j = i+1; j < this.vertices.length; ++j)
-		{
-			if (vec2.is_same_loc(this.vertices[i], this.vertices[j]))
-			{
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-// returns boolean; arg is of type vec2
-// raycasting to determine how many edges are intersected
-// polygon can be simple or non-simple; point inside/outside classification uses even&odd rule
-// point barely touching edge/vertex counts as "inside" polygon
-// polygon can have >= 0 vertices
-Polygon.prototype.contains_point = function(point)
-{
-	if (this.vertices.length == 0)
-	{
-		return false;
-	}
-	else if(this.vertices.length == 1)
-	{
-		return point.subtract(polygon.vertices[0]).len_sq() == 0.0;
-	}
-
-	// maximum polygon horizontal diameter is width bounding box, which is < wBoundBox+hBoundBox; also need to add horizontal space between point and polygon
-	let maxX = Math.max.apply(undefined, this.vertices.map(vertex => vertex.x));
-	if (maxX < point.x)
-	{
-		return false;
-	}
-
-	let rayLen = (maxX - point.x + 1)*2;	// must be positive length and must pierce (rightward) all the way through polygon
-	let rayEnd = new vec2(rayLen, 0).add(point);
-	
-
-	// count all well-behaved intersections (intersecting in middle of line segment) and poorly behaved line segments (ray contains line segment endpoint, or line segment coincides with ray)
-	let nLineSegmentsIntersected = 0;
-	for(let i = 0; i < this.vertices.length; ++i)
-	{
-		let i1 = (i+1) % this.vertices.length;
-		if (vec2.is_same_loc(this.vertices[i], this.vertices[i1]))
-		{
-			continue;	// ignore degenerate lineSegs
-			// if test point is exactly at a polygon vertex, then one of the point_inside_line_segment() tests will catch it
-		}
-
-		if (point_inside_line_segment(point, this.vertices[i], this.vertices[i1]))
-		{
-			// [point barely touching edge or vertex] counts as "inside" polygon
-			return true;
-		}
-		if (intersecting_line_segments(point, rayEnd, this.vertices[i], this.vertices[i1]))
-		{
-			++nLineSegmentsIntersected;
-		}
-	}
-	
-	// count all vertex intersections
-	// note that nPositive, nNegative, and nZero will intentionally double-count edges incident on two [vertices contained by ray]
-	let nPositive = 0;	// number of edges incident on all [vertex contained by ray] that have direction (away from ray) in same direction as rayNormal
-	let nNegative = 0;	// number of edges incident on all [vertex contained by ray] that have direction (away from ray) in opposite direction as rayNormal
-	let nZero = 0;	// number of edges incident on all a [vertex contained by ray] that are parellel to ray
-	
-	let rayNormal = new vec2(0, 1);
-	for(let i = 0; i < this.vertices.length; ++i)
-	{
-		if (point_inside_line_segment(this.vertices[i], point, rayEnd))
-		{
-			let iNext = (i+1) % this.vertices.length;
-			let iPrev = (i-1+this.vertices.length) % this.vertices.length;
-			let neighborVertices = [this.vertices[iNext], this.vertices[iPrev]];
-			for(let j = 0; j < neighborVertices.length; ++j)
-			{
-				let dp = vec2.dot(neighborVertices[j].subtract(this.vertices[i]), rayNormal);
-				if (dp > 0)
-				{
-					++nPositive;
-				}
-				else if (dp < 0)
-				{
-					++nNegative;
-				}
-				else if (dp == 0)
-				{
-					++nZero;
-				}
-				else
-				{
-					throw "bad dot product";
-				}
-			}
-		}
-	}
-
-	if (nZero % 2 == 1)
-	{
-		throw "point cannot be inside edge; this possibility was eliminated earlier";
-	}
-	
-	let vertexParity = (nPositive%2 == 1 && nNegative%2 == 1)?1:0;
-	
-	// if ray contains vertex v, then ray also intersects the two lineSegs incident on v
-	// thus, must add vertex intersection parity (ignoring false positives) to compensate
-	return (nLineSegmentsIntersected + vertexParity) % 2 == 1;
-}
-
-// can only be called on simple polygon with >=3 vertices
-// returns index of this.vertices that is center of ear
-Polygon.prototype.get_ear_mid_index = function()
-{
-	if (this.vertices.length < 3)
-	{
-		console.log('cannot get mid ear index of polygon having < 3 vertices!');
-	}
-	if (this.vertices.length == 3)
-	{
-		return 1;
-	}
-	for(let i = 0; i < this.vertices.length; ++i)
-	{
-		// vertex with index i is middle of ear
-		let iNext = (i+1) % this.vertices.length;
-		let iPrev = (i-1+this.vertices.length) % this.vertices.length;
-		let earCandidate = new Polygon( [this.vertices[iPrev], this.vertices[i], this.vertices[iNext]] );
-		let validEarCandidate = true;
-
-		// ear must have no points inside ear triangle
-		for(let j = 0; j < this.vertices.length; ++j)
-		{
-			if ( j == i || j == iPrev || j == iNext )
-			{
-				// ignore the 3 vertices constituting the ear
-				continue;
-			}
-			
-			if (earCandidate.contains_point(this.vertices[j]))
-			{
-				validEarCandidate = false;
-				break;
-			}
-		}
-
-		if (validEarCandidate)
-		{
-			// ear must be convex
-			let convexTestPoint = this.vertices[i].add(this.vertices[iPrev]).add(this.vertices[iNext]).mult(1.0/3);	// test point = avg of ear's 3 corners
-			if (this.contains_point(convexTestPoint))
-			{
-				return i;
-			}
-		}
-	}
-	throw 'error: no ear found';
-}
-
-// line segment from v1a to v1b, and another line segment from v2a to v2b
-// each line segment must be non-degenerate
-function intersecting_line_segments(v1a, v1b, v2a, v2b)
-{
-	let L1 = v1a.subtract(v1b);
-	let n1 = new vec2(-L1.y, L1.x);
-	let L2 = v2a.subtract(v2b);
-	let n2 = new vec2(-L2.y, L2.x);
-	// barely touching endpoints counts as intersecting
-	return  vec2.dot(n1, v2a.subtract(v1a)) * vec2.dot(n1, v2b.subtract(v1a)) <= 0.0 &&
-		vec2.dot(n2, v1a.subtract(v2a)) * vec2.dot(n2, v1b.subtract(v2a)) <= 0.0;
-}
-
-// assumes no line segments are degenerate
-Polygon.prototype.has_intersecting_line_segments = function()
-{
-	if (this.vertices.length < 4)
-	{
-		return false;
-	}
-
-	// line segment with index i goes from vertices[i] to vertices[i+1], wrapping index around to zero
-	for(let i1 = 0; i1 < this.vertices.length; ++i1)
-	{
-		let i2 = (i1+1) % this.vertices.length;
-		for(let j1 = i1+2; j1 < this.vertices.length; ++j1)
-		// ignore pairings where 1 or more of vertices are shared between lineSeg1 and lineSeg2
-		{
-			let j2 = (j1+1) % this.vertices.length;
-			if (j2 == i1)
-			{
-				continue;
-			}
-
-			if (intersecting_line_segments(this.vertices[i1], this.vertices[i2], this.vertices[j1], this.vertices[j2]))
-			{
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-// vertices can be any location, in any quantity, even degenerate vertices
-Polygon.prototype.is_simple_polygon = function()
-{
-	// simple polygon: no duplicate vertices, no intersecting edges, no edges containing vertices
-	if (this.has_duplicate_vertices())
-	{
-		return false;
-	}
-	return !this.has_intersecting_line_segments();
-}
-
-// returns array of Polygons (triangles)
-// memory addresses of vertices of returned triangles may or may not be distinct, and may be taken from *this* polygon's vertices
-// does not modify underlying polygon
-Polygon.prototype.triangulate = function()
-{
-	if (!this.is_simple_polygon())
-	{
-		throw 'cannot triangulate non-simple polygon!';
-	}
-
-	if (this.vertices.length < 3)
-	{
-		return [];
-	}
-
-	let ears = [];	// array of Polygons
-	let remainingPoly = new Polygon(this.vertices.slice());	// shallow clone
-	while(remainingPoly.vertices.length > 3)
-	{
-		// remove ear and push to retVal
-		let index = remainingPoly.get_ear_mid_index();
-		let iNext = (index+1) % remainingPoly.vertices.length;
-		let iPrev = (index-1+remainingPoly.vertices.length) % remainingPoly.vertices.length;
-		ears.push( new Polygon( [remainingPoly.vertices[iPrev], remainingPoly.vertices[index], remainingPoly.vertices[iNext]] ) );
-		remainingPoly.vertices.splice(index, 1);
-	} // end triangulation
-
-	// add final triangle
-	ears.push(remainingPoly);
-	return ears;
-}
-
-
-// mean of all vertices
-Polygon.prototype.get_center = function()
-{
-	if (this.vertices.length == 0)
-	{
-		throw 'cannot get center of polygon containing no vertices!';
-	}
-	return this.vertices.reduce((accum, v) => accum.add(v)).mult(1/this.vertices.length);
-}
-
-Polygon.prototype.get_AABB = function()
-{
-	if (this.vertices.length == 0){
-		throw 'cannot get AABB of polygon with no vertices!';
-	}
-	
-	let rect = new Rect(Math.min.apply(undefined, this.vertices.map(v => v.x)),
-						Math.min.apply(undefined, this.vertices.map(v => v.y)),
-						Math.max.apply(undefined, this.vertices.map(v => v.x)),
-						Math.max.apply(undefined, this.vertices.map(v => v.y)));
-	rect.w -= rect.x;
-	rect.h -= rect.y;
-	return rect;
-}
+//const CANVAS_WIDTH = screen.width*18/19;
+//const CANVAS_HEIGHT = screen.height*12/18;
+const CANVAS_WIDTH = 392;	// for testing on PC only
+const CANVAS_HEIGHT = 190;
+let canvas = undefined;
+let ctx = undefined;
+let xMouse = 0;	// mouse coords relative to topleft of canvas
+let yMouse = 700;
+let xCanvas = undefined;
+let yCanvas = undefined;
+const FPS = 60;
+let frame = 0;
+const UNIVERSAL_LINE_WIDTH = 2;
 
 // constructor
 function Rect(x, y, w, h)
@@ -1136,625 +207,65 @@ function Rect(x, y, w, h)
 	this.h = h;
 }
 
-Polygon.prototype.get_random_point_inside = function()
+function calculate_canvas_corner()
 {
-	let aabb = this.get_AABB();
-	const MAX_ATTEMPTS = 10000;
-	for(let i = 0; i < MAX_ATTEMPTS; ++i)
-	{
-		let point = new vec2(Math.random()*aabb.w + aabb.x, Math.random()*aabb.h + aabb.y);
-		if (this.contains_point(point)){
-			return point;
-		}
-	}
-	throw 'could not find point inside polygon within maximum number of attempts';
-}
-
-// line segment from v1, v2
-// if point is at same location as one of the endpoints, then point counts as "inside" line segment
-function point_inside_line_segment(point, v1, v2)
-{
-	let parallel = v2.subtract(v1);
-	let n = new vec2(-parallel.y, parallel.x);
-	if ( vec2.dot(point.subtract(v1), n) != 0.0 )	// point must be on infinite line
-	{
-		return false;
-	}
-	return vec2.dot( point.subtract(v1), v2.subtract(v1) ) >= 0 && vec2.dot( point.subtract(v2), v1.subtract(v2) ) >= 0;	// point must be within bounds of line segment
+	let rect = canvas.getBoundingClientRect();
+	xCanvas = rect.x;
+	yCanvas = rect.y;
 }
 
 // constructor
-// path is array of vec2, and each vec2.debugId is the [polygon that generated the vec2]'s .debugId
-function PathfindingDebuggerStep(pathVertices, description)
+function vec3(x, y, z)
 {
-	this.pathPolygon = new Polygon(pathVertices);	// Polygon
-	this.description = description;
+	this.x = x;
+	this.y = y;
+	this.z = z;
 }
 
-PathfindingDebuggerStep.prototype.toString = function()
+// vector addition; returns new vec3
+vec3.prototype.sum = function(v)
 {
-	return this.description;
+	return new vec3(this.x + v.x, this.y + v.y, this.z + v.z);
 }
 
-PathfindingDebuggerStep.prototype.render = function()
+// scalar multiplication; returns new vec3
+vec3.prototype.mult = function(f)
 {
-	const PATH_COLOR = 'white';
-	const PATH_VERTEX_RADIUS = 5;
-	this.pathPolygon.render_open(PATH_COLOR, PATH_VERTEX_RADIUS);
+	return new vec3(this.x*f, this.y*f, this.z*f);
 }
 
-// constructor
-function PathfindingDebugger()
+// returns new vec3, where each component is in the range [-r, r)
+function get_random_vec3(r = 1.0)
 {
-	this.steps = [];	// Array of PathfindingDebuggerStep
+	return new vec3(Math.random()*2*r-r, Math.random()*2*r-r, Math.random()*2*r-r);
 }
-let pathfindingDebugger = new PathfindingDebugger();
-let pathfindingDebuggerIndex = -1;
+let LORENZ_RHO = 28.0;
+let LORENZ_SIGMA = 10.0;
+let LORENZ_BETA = 2.66666666;
 
-PathfindingDebugger.prototype.add_step = function(pathVertices, description)
+// returns vec3 of {dx/dt, dy/dt, dz/dt} at arg v
+function get_gradient(v)
 {
-	this.steps.push( new PathfindingDebuggerStep(pathVertices.slice(), description) );
-}
-
-PathfindingDebugger.prototype.get_step_description = function(index)
-{
-	if (index < 0 || index >= this.steps.length)
-	{
-		return 'no pathfinding step at index '.concat(index);
-	}
-	return this.steps[index].toString();
+	return new vec3(LORENZ_SIGMA*(v.y-v.x), v.x*(LORENZ_RHO-v.z)-v.y, v.x*v.y-LORENZ_BETA*v.z);
 }
 
-PathfindingDebugger.prototype.render_step = function(index)
+const NUM_TIMESTEPS_PER_FRAME = 1;
+const dt = 0.02;
+const NUM_INITIAL_STATES = 30;
+const MEMORY_LEN = 20;
+const INITIAL_SPREAD_WIDTH = 14;
+
+let states = new Array(NUM_INITIAL_STATES).fill(0).map(v => [get_random_vec3(INITIAL_SPREAD_WIDTH)]);	// Array of [Array of vec3], where states[i][j] is the i-th initial state upon the j-th timestep
+for(let stateChain of states)
 {
-	if (index < 0 || index >= this.steps.length)
-	{
-		return;
-	}
-	this.steps[index].render();
+	// state[i].rgb is a css-friendly rgb string of that stateChain's color
+	stateChain.rgb = new Array(3).fill(0).map(v => `${Math.floor(Math.random()*256).toString(16).padStart(2, '0')}`).join('');
+	stateChain.rgb = '#'.concat(stateChain.rgb);
 }
-
-
-
-// constructor
-function Node(hCost, polygon, debugId, loc)
-{
-	// properties that must be defined before running a star pathfinding algorithm
-	this.neighbors = [];	// Array of Edge objects which *this* node can travel to; can be directed graph; portal can have any orientation
-	this.hCost = hCost;
-	
-	// properties defined during a star pathfinding algorithm
-	this.gCost = undefined;
-	this.parent = undefined;	// Edge object; unlike regular cost, .parent.cost is [cost from parent to this]
-	this.child = undefined;		// Edge object
-
-	// optional properties
-	this.loc = loc;		// vec2
-	this.polygon = polygon;
-	this.debugId = debugId;
-}
-
-Node.prototype.toString = function()
-{
-	return '(debugId: '.concat(this.debugId, ',\tchild: ', (this.child ? this.child.toNode.debugId : 'none'), ',\tparent: ', (this.parent ? this.parent.toNode.debugId : 'none'), ')');
-}
-
-Node.prototype.get_f_cost = function()
-{
-	return this.gCost + this.hCost;
-}
-
-Node.prototype.render = function()
-{
-	this.loc.render_solid('green', 5);
-}
-
-function Edge(selfNode, neighborNode, portal, cost)
-{
-	this.fromNode = selfNode;	// from-node
-	this.toNode = neighborNode;	// destination node
-	this.portal = portal;	// LineSeg
-	this.cost = cost;	// cost of this 1 edge; used for .parent and .child, but .cost is the cost from parent to child, never from child to parent
-}
-
-// constructor
-// triangles interconnected by shared edges
-function Mesh(nodes, edges)
-{
-	this.nodes = nodes;
-	this.edges = edges;
-}
-
-// .nodes and .edges must be already populated
-Mesh.render_network = function(startNode, nodeColorStr, edgeColorStr, portalColorStr)
-{
-	const NODE_RADIUS = 4;
-	let closedList = [];		// list of already-traversed nodes
-	let openList = [startNode];	// list of nodes to potentially traverse
-	while(openList.length > 0)
-	{
-		let node = openList.pop();
-		if (closedList.indexOf(node) != -1)
-		{
-			continue;
-		}
-		
-		// when traversing a node N, display all its edges, then check if N's neighbors nodes need to be traversed
-		closedList.push(node);
-		
-		if (nodeColorStr != undefined){
-			node.loc.render_ring(nodeColorStr, NODE_RADIUS);
-		}
-		
-		node.neighbors.forEach(function(edge){
-			openList.push(edge.toNode);
-			if (edgeColorStr != undefined){
-				new LineSeg(node.loc, edge.toNode.loc).render_saw(edgeColorStr, 0.5, 0.05);
-			}
-			if (portalColorStr != undefined){
-				edge.portal.render(portalColorStr);
-			}
-		});
-	}
-}
-
-Mesh.prototype.render_network = function(nodeColorStr, edgeColorStr, portalColorStr)
-{
-	const NODE_RADIUS = 4;
-	if (nodeColorStr != undefined){
-		this.nodes.forEach(node => node.loc.render_ring(nodeColorStr, NODE_RADIUS));
-	}
-	if (edgeColorStr != undefined || portalColorStr != undefined){
-		this.edges.forEach(edge => {
-			if (edgeColorStr != undefined){
-				new LineSeg(edge.fromNode.loc, edge.toNode.loc).render_saw(edgeColorStr, 0.5, 0.05);
-			}
-			
-			if (portalColorStr != undefined){
-				edge.portal.render(portalColorStr);
-			}
-		});
-		
-	}
-}
-
-// returns mesh created from Array of simple [convex or concave] polygon
-Mesh.from_simple_polygons = function(polygons)
-{
-	polygons.forEach(p => {
-		if (!p.is_simple_polygon()){
-			throw new Error('cannot generate mesh from non-simple polygon! .debugId:'.concat(p.debugId));
-		}
-	});
-	let triangles = [].concat.apply([], polygons.map(p => p.triangulate()));
-	triangles.forEach((t, i) => t.debugId = 'tri_'.concat(i));
-	return Mesh.link_shared_edges(triangles);
-}
-
-// returns Mesh of Nodes that are interlinked via Edges
-// requires every vertex in every polygon to have a unique .debugId
-// arg is Array of convex Polygon (each with >=3 vertices); can be the Array returned by Polygon.triangulate()
-Mesh.link_shared_edges = function(polygons)
-{
-	function get_hash(vId1, vId2)
-	{
-		// get string hash of 2 unordered vec2.debugId
-		const CONCAT_CHAR = '+';
-		let s1 = vId1.toString();
-		let s2 = vId2.toString();
-		return (s1 < s2 ? s1.concat(CONCAT_CHAR, s2) : s2.concat(CONCAT_CHAR, s1));  // requires every vertex in every polygon to have a unique .debugId
-	}
-
-	// create nodes	and lookup hash table of lineSegs of all polygons
-	let nodes = polygons.map(polygon => new Node(undefined, polygon, polygon.debugId, polygon.get_center()));	// convert polygons to nodes
-	let nodesPerLs = {};	// nodesPerLs[lineSegHash] = {lineSeg: <shared LineSeg>, nodes: <Array of [Node whose Polygon contains this lineSeg]s>}
-	for(let node of nodes)
-	{
-		for(let i = 0; i < node.polygon.vertices.length; ++i)
-		{
-			let i1 = (i+1) % node.polygon.vertices.length;
-			let hash = get_hash(node.polygon.vertices[i].debugId, node.polygon.vertices[i1].debugId);
-			if (hash in nodesPerLs)
-			{
-				nodesPerLs[hash].nodes.push(node);	// lineSeg shared by >1 polygon is added to same array (nodesPerLs[hash].nodes)
-			}
-			else
-			{
-				nodesPerLs[hash] = {lineSeg: new LineSeg(node.polygon.vertices[i], node.polygon.vertices[i1], hash), nodes: [node]};
-			}
-		}
-	}
-	
-	let edges = [];
-	for(let sharedLsNodes of Object.values(nodesPerLs))
-	{
-		if (sharedLsNodes.nodes.length > 2)
-		{
-			throw 'cannot have >2 polygons sharing same edge: '.concat(sharedLsNodes.nodes.map(n => n.polygon.debugId));
-		}
-		else if (sharedLsNodes.nodes.length == 2)
-		{
-			// link edges
-			let cost = sharedLsNodes.nodes[0].loc.subtract(sharedLsNodes.nodes[1].loc).len();
-			let e01 = new Edge(sharedLsNodes.nodes[0], sharedLsNodes.nodes[1], sharedLsNodes.lineSeg, cost);
-			let e10 = new Edge(sharedLsNodes.nodes[1], sharedLsNodes.nodes[0], sharedLsNodes.lineSeg, cost);
-			sharedLsNodes.nodes[0].neighbors.push(e01);
-			sharedLsNodes.nodes[1].neighbors.push(e10);
-			edges.push(e01, e10);
-		}
-	}
-	return new Mesh(nodes, edges);
-}
-
-// resets the properties necessary for a star pathfinding algorithm: .gCost, .parent, .child
-// 		also sets the hCost
-Mesh.prototype.reset_a_star = function(finishV)
-{
-	for(let n of this.nodes)
-	{
-		n.gCost = undefined;
-		n.parent = undefined;
-		n.child = undefined;
-		n.hCost = n.loc.subtract(finishV).len();
-	}
-}
-
-// a star pathfinding
-// returns list of nodes connected by .child/.parent, starting at startNode and ending at finishNode
-// returns undefined if there is no path from startNode to finishNode
-Mesh.prototype.a_star = function(startV, finishV)
-{
-	let startNode = this.nodes.find(n => n.polygon.contains_point(startV));
-	let finishNode = this.nodes.find(n => n.polygon.contains_point(finishV));
-	if (startNode == undefined){
-		throw 'cannot find start node';
-	}
-	if (finishNode == undefined){
-		throw 'cannot find finish node';
-	}
-	this.reset_a_star(finishV);
-	
-	startNode.gCost = 0;
-	let openList = [startNode];	// Array of Node objects that possess g-cost, always sorted from lowest fCost to highest fCost
-	let foundFinish = false;
-	while(openList.length > 0)
-	{
-		let currNode = openList.shift();
-		if (currNode == finishNode){
-			foundFinish = true;
-			break;
-		}
-
-		let hasAdded = false;
-		for(let edge of currNode.neighbors)
-		{
-			let gCost = currNode.gCost + edge.cost;
-			let parent = new Edge(edge.toNode, currNode, edge.portal, edge.cost);
-			if (edge.toNode.gCost == undefined)
-			{
-				// neighbor not yet explored; add neighbor to openList
-				edge.toNode.gCost = gCost;
-				edge.toNode.parent = parent;
-				openList.push(edge.toNode);
-				hasAdded = true;
-			}
-			else
-			{
-				// neighbor previously explored; only update if current route more efficient
-				if (gCost < edge.toNode.gCost)
-				{
-					edge.toNode.gCost = gCost;
-					edge.toNode.parent = parent;
-				}
-			}
-		}
-		
-		if (hasAdded)
-		{
-			// sort by f cost
-			openList.sort((a, b) => a.get_f_cost() - b.get_f_cost());
-		}
-	}
-	
-	if (!foundFinish){
-		return undefined;	// could not find finishNode
-	}
-	
-	// construct chain of nodes from start (grand-grand-...-grandparent) to finish (youngest child)
-	let pathNodes = [];
-	for(let currNode = finishNode; currNode != startNode; currNode = currNode.parent.toNode){
-		currNode.parent.toNode.child = new Edge(currNode.parent.toNode, currNode, currNode.parent.portal, currNode.parent.cost);	// populate all Node.child in final path
-		pathNodes.unshift(currNode);
-	}
-	pathNodes.unshift(startNode);
-	pathfindingDebugger.add_step( pathNodes.map(node => {
-									  let v = node.polygon.get_center();
-									  v.debugId = node.polygon.debugId;
-									  return v;
-								  }), 'simple a-star pq');
-	return pathNodes;
-}
-
-// constructor
-function PullStringStep(portal, vertex, viewEnd1, viewEnd2, newViewEnd1, newViewEnd2, description, addedVertex)
-{
-	this.portal = portal;
-	this.vertex = vertex;	// at beginning of this step
-	this.viewEnd1 = viewEnd1;	// at beginning of this step
-	this.viewEnd2 = viewEnd2;
-	this.newViewEnd1 = newViewEnd1;	// at end of iteration
-	this.newViewEnd2 = newViewEnd2;	// at end of iteration
-	this.description = description;	// string
-	this.addedVertex = addedVertex;	// optional vec2
-}
-
-PullStringStep.prototype.toString = function()
-{
-	let s = ''.concat('portal: ', this.portal.debugId,
-				    '\nvertex: ', this.vertex.debugId,
-				    '\nviewEnd1: ', this.viewEnd1.debugId,
-				    '\nviewEnd2: ', this.viewEnd2.debugId,
-				    '\ndescription: ', this.description);
-	if (this.addedVertex)
-	{
-		s = s.concat('\naddedVertex: ', this.addedVertex.debugId,
-					 '\nnewViewEnd1: ', this.newViewEnd1.debugId,
-					 '\nnewViewEnd2: ', this.newViewEnd2.debugId);
-	}
-	return s;
-}
-
-// constructor
-function PullStringDebugger()
-{
-	this.steps = [];
-}
-let pullStringDebugger = new PullStringDebugger();
-
-PullStringDebugger.prototype.add_step = function(portal, vertex, viewEnd1, viewEnd2, newViewEnd1, newViewEnd2, description, addedVertex)
-{
-	this.steps.push(new PullStringStep(portal, vertex, viewEnd1, viewEnd2, newViewEnd1, newViewEnd2, description, addedVertex));
-}
-
-PullStringDebugger.prototype.render_step = function(index)
-{
-	if (index < 0 || index >= this.steps.length)
-	{
-		return;
-	}
-	
-	let step = this.steps[index];
-	
-	const POINT_RADIUS = 4;
-	let portal = new LineSeg(step.portal.r1, step.portal.r2, 'portal');
-	portal.render('yellow', POINT_RADIUS);
-	portal.render_debug_id('yellow');
-	
-	let vertex = new vec2(step.vertex.x, step.vertex.y, 'vertex  ');
-	vertex.render_solid('red', POINT_RADIUS);
-	vertex.render_debug_id('red');
-	
-	let vd1 = new LineSeg(step.vertex, step.viewEnd1, 'vd1');
-	vd1.render_saw('cyan', 20);
-	vd1.render_debug_id('cyan');
-		
-	let vd2 = new LineSeg(step.vertex, step.viewEnd2, 'vd2');
-	vd2.render_saw('cyan', 10);
-	vd2.render_debug_id('cyan');
-	
-	let Lv1 = new LineSeg(step.vertex, step.portal.r1, 'v1');
-	Lv1.render('magenta');
-	Lv1.render_debug_id('magenta');
-	
-	let Lv2 = new LineSeg(step.vertex, step.portal.r2, 'v2');
-	Lv2.render('magenta');
-	Lv2.render_debug_id('magenta');
-	
-	let endVertex = step.vertex;
-	if (step.addedVertex)
-	{
-		let addedVertex = new vec2(step.addedVertex.x, step.addedVertex.y, 'addedVertex');
-		addedVertex.render_solid('orange', POINT_RADIUS);
-		addedVertex.render_debug_id('orange');
-		
-		endVertex = addedVertex;
-	}
-	
-	let Lnv1 = new LineSeg(endVertex, step.newViewEnd1, 'new vd1');
-	Lnv1.render('azure');
-	Lnv1.render_debug_id('azure');
-	
-	let Lnv2 = new LineSeg(endVertex, step.newViewEnd2, 'new vd2');
-	Lnv2.render('azure');
-	Lnv2.render_debug_id('azure');
-}
-
-PullStringDebugger.prototype.get_step_description = function(index)
-{
-	if (index < 0 || index >= this.steps.length)
-	{
-		return 'no pull string step at index '.concat(index);
-	}
-	return this.steps[index].toString();
-}
-let pullStringDebuggerIndex = -1;
-
-// reverses portals if necessary, so that all portals [from parent to child] have same cross product orientation
-//		reverses in place; swaps portal.r1 and portal.r2 without changing underlying vertices' locations
-// arg is array of nodes from start to finish
-//      portals from child to parent all have same orientation, which is opposite of parent-to-child orientation
-// returns nothing
-Mesh.orient_path_portals = function(pathNodes)
-{
-	for(let i = 0; i < pathNodes.length - 1; ++i)
-	{
-		if (vec2.cross( pathNodes[i+1].loc.subtract(pathNodes[i].loc), pathNodes[i].child.portal.r2.subtract(pathNodes[i].child.portal.r1) ) < 0)
-		{
-			// reverse portal.r1 and portal.r2
-			let tempR1 = pathNodes[i].child.portal.r1;
-			pathNodes[i].child.portal.r1 = pathNodes[i].child.portal.r2;
-			pathNodes[i].child.portal.r2 = tempR1;
-		}
-	}
-}
-
-// returns array of vertices as Polygon: [startV, v1, v2, v3, ... , vn, endV]
-// portals is nonempty array of nondegenerate LineSeg whose orientation doesn't matter
-// assumes midPortals link CONNECTED convex polygons, otherwise undefined behavior
-//		assumes lineSegs are oriented such that cross(forward, r2-r1) has same sign for all lineSegs, where forward is the vector penetrating the lineSeg perpendicularly, in the "forward" direction
-//      can call Mesh.orient_path_portals() before calling pull_string() to make sure orientation is correct
-// assumes startV is in first polygon, and endV is in final polygon, otherwise undefined behavior
-Mesh.pull_string = function(startV, endV, midPortals, pullStringDebugger = undefined)
-{
-	if (pullStringDebugger == undefined)
-	{
-		pullStringDebugger = new PullStringDebugger();
-	}
-	
-	if (midPortals.length == 0)
-	{
-		return new Polygon([startV, endV]);
-	}
-	
-	let vertex = startV;	// vertex of camera cone
-	let path = [startV];	// array of vec2
-	let viewEnd1 = midPortals[0].r1;
-	let viewEnd2 = midPortals[0].r2;
-	let viewEnd1PortalIndex = 0;	// index of portal of viewEnd1/2, for backtracking after adding new vertex to path
-	let viewEnd2PortalIndex = 0;
-	pullStringDebugger.add_step(midPortals[0], vertex, viewEnd1, viewEnd2, viewEnd1, viewEnd2, 'initial step');
-	const orientationSign = vec2.cross(midPortals[0].r1.subtract(vertex), midPortals[0].r2.subtract(vertex)) > 0 ? 1 : -1;
-	
-	let portals = midPortals.concat(new LineSeg(endV, endV));
-	for(let i = 1; i < portals.length; ++i)
-	{
-		let portal = portals[i];
-		let oldVertex = vertex;	// for debugger
-		let oldViewEnd1 = viewEnd1;
-		let oldViewEnd2 = viewEnd2;
-		let addedVertex = undefined, description = 'NULL_DESCRIPTION';
-		
-		let viewDirec1 = viewEnd1.subtract(vertex);
-		let viewDirec2 = viewEnd2.subtract(vertex);
-		let v1 = portal.r1.subtract(vertex);
-		let v2 = portal.r2.subtract(vertex);
-
-		let c11 = vec2.cross(viewDirec1, v1);	// cij = cross(viewDirec_i, v_j)
-		let c12 = vec2.cross(viewDirec1, v2);
-		let c21 = vec2.cross(viewDirec2, v1);
-		let c22 = vec2.cross(viewDirec2, v2);
-
-		let isInside1 = c11 * c21 <= 0.0;	// coinciding with view vectors counts as "inside"
-		let isInside2 = c12 * c22 <= 0.0;
-
-		if (isInside1 && isInside2)
-		{
-			viewEnd1 = portal.r1;
-			viewEnd2 = portal.r2;
-			viewEnd1PortalIndex = i;
-			viewEnd2PortalIndex = i;
-			description = 'both inside; shrink both views';
-		}
-		else if(isInside1 && !isInside2 || isInside2 && !isInside1)
-		{
-			let rInside = (isInside1 ? portal.r1 : portal.r2);
-			let vInside = (isInside1 ? v1 : v2);
-			let vOutside = (isInside1 ? v2 : v1);
-			if (vec2.cross(viewDirec1, viewDirec2) * vec2.cross(viewDirec1, vOutside) <= 0.0){
-				// viewDirec1 is pinched between v1 and v2; update viewEnd2
-				viewEnd2 = rInside;
-				viewEnd2PortalIndex = i;
-			}
-			else
-			{
-				// viewDirec2 pinches between v1 and v2; update viewEnd1
-				viewEnd1 = rInside;
-				viewEnd1PortalIndex = i;
-			}
-			description = 'one inside and one outside; shrink one view';
-		}
-		else
-		{	// both outside; must add vertex to path
-
-			if (c11*c12 > 0.0)
-			{
-				// both on same side
-				let addedVertexPortalIndex;
-				if (vec2.cross(viewDirec1, viewDirec2) * vec2.cross(viewDirec1, v1) <= 0.0)
-				{
-					// portal endpoint vectors are both closer to viewDirec1
-					vertex = viewEnd1;
-					addedVertexPortalIndex = viewEnd1PortalIndex;
-				}
-				else
-				{
-					// portal endpoint vectors are both closer to viewDirec2
-					vertex = viewEnd2;
-					addedVertexPortalIndex = viewEnd2PortalIndex;
-				}
-				
-				// next iteration's portal is first [portal of the viewEnd that became added vertex] that doesn't contain added vertex
-				let index = portals.findIndex((portal, i) => i > addedVertexPortalIndex && portal.r1 != vertex && portal.r2 != vertex);
-				if (index == -1)
-				{
-					throw new Error('could not find index of next iteration\'s portal');
-				}
-				viewEnd1 = portals[index].r1;
-				viewEnd2 = portals[index].r2;
-				i = index-1;
-				description = 'both outside on same side; add vertex to path';
-
-				path.push(vertex);
-				addedVertex = vertex;
-			}
-			else
-			{
-				// else outside on different sides; do nothing
-				description = 'both outside on different sides; unchanged views';
-			}
-		}
-		
-		pullStringDebugger.add_step(portal, oldVertex, oldViewEnd1, oldViewEnd2, viewEnd1, viewEnd2, description, addedVertex); // addedVertex can be undefined
-	}
-	path.push(endV);
-	return new Polygon(path);
-}
-
-// run a-star pathfinding, then pull string; returns final path as Polygon
-Mesh.prototype.pull_a_star_string = function(startV, finishV, pullStringDebugger)
-{
-	let pathNodes = this.a_star(startV, finishV);
-	if (pathNodes == undefined)
-	{
-		throw new Error('no path from start to finish');
-	}
-	Mesh.orient_path_portals(pathNodes);
-	return Mesh.pull_string(startV, finishV, pathNodes.slice(0, -1).map(n => n.child.portal), pullStringDebugger);
-}
-
-function* gen_id(startIndex = 0, prefix = undefined)
-{
-	for(let i = startIndex; true; ++i)
-	{
-		yield (prefix ? prefix : '').concat(i);
-	}
-}
-
-function update_mouse_coords(x, y)
-{
-	document.getElementById('mouseCoords').innerHTML = 'rounded mouse coords: ('.concat(x.toFixed(2), ', ', y.toFixed(2), ')');
-}
-
-// load polygon
-polygonSrc = '{"polygons":[{"vertices":[{"x":244,"y":486,"debugId":"v0"},{"x":302.99346964993043,"y":491.42468686436143,"debugId":"v1"},{"x":302,"y":518,"debugId":"v2"},{"x":364,"y":528,"debugId":"v3"},{"x":361.32472691161865,"y":496.78848063555114,"debugId":"v4"},{"x":418,"y":502,"debugId":"v5"},{"x":421.44262295081967,"y":537,"debugId":"v6"},{"x":395,"y":537,"debugId":"v7"},{"x":393,"y":597,"debugId":"v8"},{"x":427.22682370820667,"y":595.8060410334347,"debugId":"v9"},{"x":430,"y":624,"debugId":"v10"},{"x":246,"y":629,"debugId":"v11"},{"x":245.53889674681753,"y":596.0311173974541,"debugId":"v12"},{"x":281,"y":597,"debugId":"v13"},{"x":276,"y":532,"debugId":"v14"},{"x":244.7074960895199,"y":536.5859704006738,"debugId":"v15"}],"debugId":"p_0","windingNum":1},{"vertices":[{"x":344,"y":204,"debugId":"v16"},{"x":436,"y":196,"debugId":"v17"},{"x":428.33360807747783,"y":219.4372553059963,"debugId":"v18"},{"x":381,"y":223,"debugId":"v19"},{"x":384,"y":274,"debugId":"v20"},{"x":410.5804873075747,"y":273.71108165970026,"debugId":"v21"},{"x":401,"y":303,"debugId":"v22"},{"x":348.48588431671385,"y":296.39226358952027,"debugId":"v23"},{"x":349,"y":273,"debugId":"v24"},{"x":304,"y":265,"debugId":"v25"},{"x":300.96156300971563,"y":290.41238210056025,"debugId":"v26"},{"x":250,"y":284,"debugId":"v27"},{"x":269,"y":261,"debugId":"v29"},{"x":286,"y":209,"debugId":"v30"}],"debugId":"p_1","windingNum":1},{"vertices":[{"x":293,"y":357,"debugId":"v32"},{"x":300.96156300971563,"y":290.41238210056025,"debugId":"v26"},{"x":304,"y":265,"debugId":"v25"},{"x":349,"y":273,"debugId":"v24"},{"x":348.48588431671385,"y":296.39226358952027,"debugId":"v23"},{"x":347,"y":364,"debugId":"v33"},{"x":448.1120470651157,"y":359.02727637384675,"debugId":"v34"},{"x":469,"y":358,"debugId":"v35"},{"x":461,"y":421,"debugId":"v36"},{"x":444.0605129780372,"y":421.31961296267855,"debugId":"v37"},{"x":355,"y":423,"debugId":"v38"},{"x":361.32472691161865,"y":496.78848063555114,"debugId":"v4"},{"x":364,"y":528,"debugId":"v3"},{"x":302,"y":518,"debugId":"v2"},{"x":302.99346964993043,"y":491.42468686436143,"debugId":"v1"},{"x":306,"y":411,"debugId":"v39"},{"x":224.64287463271302,"y":409.28721841332026,"debugId":"v40"},{"x":211,"y":409,"debugId":"v41"},{"x":208,"y":369,"debugId":"v42"},{"x":224.14791040699262,"y":366.72029500136574,"debugId":"v43"}],"debugId":"p_2","windingNum":1},{"vertices":[{"x":93,"y":431,"debugId":"v49"},{"x":156,"y":422,"debugId":"v50"},{"x":156.83867765313212,"y":448.6280154869453,"debugId":"v51"},{"x":160,"y":549,"debugId":"v52"},{"x":244.7074960895199,"y":536.5859704006738,"debugId":"v15"},{"x":276,"y":532,"debugId":"v14"},{"x":281,"y":597,"debugId":"v13"},{"x":245.53889674681753,"y":596.0311173974541,"debugId":"v12"},{"x":98,"y":592,"debugId":"v53"},{"x":93.79528545696608,"y":456.6081917143081,"debugId":"v54"}],"debugId":"p_4","windingNum":1},{"vertices":[{"x":67,"y":460,"debugId":"v55"},{"x":76,"y":338,"debugId":"v56"},{"x":108.1560650887574,"y":341.47633136094674,"debugId":"v44"},{"x":106,"y":357,"debugId":"v28"},{"x":153,"y":380,"debugId":"v48"},{"x":156.41603838245373,"y":346.6936257710761,"debugId":"v47"},{"x":224,"y":354,"debugId":"v57"},{"x":224.14791040699262,"y":366.72029500136574,"debugId":"v43"},{"x":208,"y":369,"debugId":"v42"},{"x":211,"y":409,"debugId":"v41"},{"x":224.64287463271302,"y":409.28721841332026,"debugId":"v40"},{"x":225,"y":440,"debugId":"v58"},{"x":156.83867765313212,"y":448.6280154869453,"debugId":"v51"},{"x":156,"y":422,"debugId":"v50"},{"x":93,"y":431,"debugId":"v49"},{"x":93.79528545696608,"y":456.6081917143081,"debugId":"v54"}],"debugId":"p_5","windingNum":1},{"vertices":[{"x":395,"y":537,"debugId":"v7"},{"x":421.44262295081967,"y":537,"debugId":"v6"},{"x":500,"y":537,"debugId":"v59"},{"x":497.4948905109489,"y":447.65109489051093,"debugId":"v60"},{"x":497,"y":430,"debugId":"v61"},{"x":573,"y":427,"debugId":"v62"},{"x":572.3445527015058,"y":440.436669619132,"debugId":"v63"},{"x":565,"y":591,"debugId":"v64"},{"x":427.22682370820667,"y":595.8060410334347,"debugId":"v9"},{"x":393,"y":597,"debugId":"v8"}],"debugId":"p_6","windingNum":1},{"vertices":[{"x":381,"y":223,"debugId":"v19"},{"x":428.33360807747783,"y":219.4372553059963,"debugId":"v18"},{"x":567,"y":209,"debugId":"v65"},{"x":572.1654493489997,"y":319.19625277865987,"debugId":"v66"},{"x":573,"y":337,"debugId":"v67"},{"x":496,"y":344,"debugId":"v68"},{"x":491.0341217163691,"y":326.3711320931102,"debugId":"v69"},{"x":476,"y":273,"debugId":"v70"},{"x":410.5804873075747,"y":273.71108165970026,"debugId":"v21"},{"x":384,"y":274,"debugId":"v20"}],"debugId":"p_7","windingNum":1},{"vertices":[{"x":450,"y":330,"debugId":"v71"},{"x":491.0341217163691,"y":326.3711320931102,"debugId":"v69"},{"x":496,"y":344,"debugId":"v68"},{"x":573,"y":337,"debugId":"v67"},{"x":572.1654493489997,"y":319.19625277865987,"debugId":"v66"},{"x":597,"y":317,"debugId":"v72"},{"x":608,"y":437,"debugId":"v73"},{"x":572.3445527015058,"y":440.436669619132,"debugId":"v63"},{"x":573,"y":427,"debugId":"v62"},{"x":497,"y":430,"debugId":"v61"},{"x":497.4948905109489,"y":447.65109489051093,"debugId":"v60"},{"x":442,"y":453,"debugId":"v74"},{"x":444.0605129780372,"y":421.31961296267855,"debugId":"v37"},{"x":461,"y":421,"debugId":"v36"},{"x":469,"y":358,"debugId":"v35"},{"x":448.1120470651157,"y":359.02727637384675,"debugId":"v34"}],"debugId":"p_8","windingNum":1}],"verticesDict":{"v0":{"x":244,"y":486,"debugId":"v0"},"v1":{"x":302.99346964993043,"y":491.42468686436143,"debugId":"v1"},"v2":{"x":302,"y":518,"debugId":"v2"},"v3":{"x":364,"y":528,"debugId":"v3"},"v4":{"x":361.32472691161865,"y":496.78848063555114,"debugId":"v4"},"v5":{"x":418,"y":502,"debugId":"v5"},"v6":{"x":421.44262295081967,"y":537,"debugId":"v6"},"v7":{"x":395,"y":537,"debugId":"v7"},"v8":{"x":393,"y":597,"debugId":"v8"},"v9":{"x":427.22682370820667,"y":595.8060410334347,"debugId":"v9"},"v10":{"x":430,"y":624,"debugId":"v10"},"v11":{"x":246,"y":629,"debugId":"v11"},"v12":{"x":245.53889674681753,"y":596.0311173974541,"debugId":"v12"},"v13":{"x":281,"y":597,"debugId":"v13"},"v14":{"x":276,"y":532,"debugId":"v14"},"v15":{"x":244.7074960895199,"y":536.5859704006738,"debugId":"v15"},"v16":{"x":344,"y":204,"debugId":"v16"},"v17":{"x":436,"y":196,"debugId":"v17"},"v18":{"x":428.33360807747783,"y":219.4372553059963,"debugId":"v18"},"v19":{"x":381,"y":223,"debugId":"v19"},"v20":{"x":384,"y":274,"debugId":"v20"},"v21":{"x":410.5804873075747,"y":273.71108165970026,"debugId":"v21"},"v22":{"x":401,"y":303,"debugId":"v22"},"v23":{"x":348.48588431671385,"y":296.39226358952027,"debugId":"v23"},"v24":{"x":349,"y":273,"debugId":"v24"},"v25":{"x":304,"y":265,"debugId":"v25"},"v26":{"x":300.96156300971563,"y":290.41238210056025,"debugId":"v26"},"v27":{"x":250,"y":284,"debugId":"v27"},"v29":{"x":269,"y":261,"debugId":"v29"},"v30":{"x":286,"y":209,"debugId":"v30"},"v32":{"x":293,"y":357,"debugId":"v32"},"v33":{"x":347,"y":364,"debugId":"v33"},"v34":{"x":448.1120470651157,"y":359.02727637384675,"debugId":"v34"},"v35":{"x":469,"y":358,"debugId":"v35"},"v36":{"x":461,"y":421,"debugId":"v36"},"v37":{"x":444.0605129780372,"y":421.31961296267855,"debugId":"v37"},"v38":{"x":355,"y":423,"debugId":"v38"},"v39":{"x":306,"y":411,"debugId":"v39"},"v40":{"x":224.64287463271302,"y":409.28721841332026,"debugId":"v40"},"v41":{"x":211,"y":409,"debugId":"v41"},"v42":{"x":208,"y":369,"debugId":"v42"},"v43":{"x":224.14791040699262,"y":366.72029500136574,"debugId":"v43"},"v49":{"x":93,"y":431,"debugId":"v49"},"v50":{"x":156,"y":422,"debugId":"v50"},"v51":{"x":156.83867765313212,"y":448.6280154869453,"debugId":"v51"},"v52":{"x":160,"y":549,"debugId":"v52"},"v53":{"x":98,"y":592,"debugId":"v53"},"v54":{"x":93.79528545696608,"y":456.6081917143081,"debugId":"v54"},"v55":{"x":67,"y":460,"debugId":"v55"},"v56":{"x":76,"y":338,"debugId":"v56"},"v44":{"x":108.1560650887574,"y":341.47633136094674,"debugId":"v44"},"v28":{"x":106,"y":357,"debugId":"v28"},"v48":{"x":153,"y":380,"debugId":"v48"},"v47":{"x":156.41603838245373,"y":346.6936257710761,"debugId":"v47"},"v57":{"x":224,"y":354,"debugId":"v57"},"v58":{"x":225,"y":440,"debugId":"v58"},"v59":{"x":500,"y":537,"debugId":"v59"},"v60":{"x":497.4948905109489,"y":447.65109489051093,"debugId":"v60"},"v61":{"x":497,"y":430,"debugId":"v61"},"v62":{"x":573,"y":427,"debugId":"v62"},"v63":{"x":572.3445527015058,"y":440.436669619132,"debugId":"v63"},"v64":{"x":565,"y":591,"debugId":"v64"},"v65":{"x":567,"y":209,"debugId":"v65"},"v66":{"x":572.1654493489997,"y":319.19625277865987,"debugId":"v66"},"v67":{"x":573,"y":337,"debugId":"v67"},"v68":{"x":496,"y":344,"debugId":"v68"},"v69":{"x":491.0341217163691,"y":326.3711320931102,"debugId":"v69"},"v70":{"x":476,"y":273,"debugId":"v70"},"v71":{"x":450,"y":330,"debugId":"v71"},"v72":{"x":597,"y":317,"debugId":"v72"},"v73":{"x":608,"y":437,"debugId":"v73"},"v74":{"x":442,"y":453,"debugId":"v74"}}}';
-let wallsPolygons = Polygon.import_polygons_from_string(polygonSrc);
-
-let mouseDownLoc = new vec2(undefined, undefined);
-let mouseLoc = new vec2(undefined, undefined);
 
 var game = {
-	
 	// set canvas and create Context
+	
 	setup: function(){
 		canvas = document.getElementById("myCanvas");
 		canvas.width = CANVAS_WIDTH;
@@ -1762,134 +273,102 @@ var game = {
 		ctx = canvas.getContext("2d");
 		canvas.style.width = CANVAS_WIDTH.toString() + "px";
 		canvas.style.height = CANVAS_HEIGHT.toString() + "px";
-		var rect = canvas.getBoundingClientRect();
-		xCanvas = rect.x;
-		yCanvas = rect.y;
+		calculate_canvas_corner();
 		
 		// handle mouse motion
 		window.addEventListener('mousemove', function(e){
-			xMouse = e.clientX - xCanvas;
+			xMouse = e.clientX - xCanvas;	// no need to add/subtract window.pageXOffset, because xCanvas already accounts for page offset
 			yMouse = e.clientY - yCanvas;
 			// handle mouse motion here
-			update_mouse_coords(xMouse, yMouse);
-			mouseLoc.x = xMouse;
-			mouseLoc.y = yMouse;
-		});
+		}.bind(this));
 		
 		// handle mouse click
 		window.addEventListener('mousedown', function(e){
 			xMouse = e.clientX - xCanvas;
-			yMouse = e.clientY - yCanvas;			
-			// handle click here
-			mouseDownLoc.x = xMouse;
-			mouseDownLoc.y = yMouse;
-			mouseLoc = mouseDownLoc;
-		}.bind(this));
-
-		// handle mouse release
-		window.addEventListener('mouseup', function(e){
-			xMouse = e.clientX - xCanvas;
-			yMouse = e.clientY - yCanvas;			
+			yMouse = e.clientY - yCanvas;
 			// handle click here
 		}.bind(this));
 		
-		// handle keyboard
-		window.addEventListener('keydown', function(e){
-			if(e.key == 'p')
-			{
-				gamePaused = !gamePaused;
-				debugFlailPaused = gamePaused;
-				mustImmediatePause = false;
-				console.log('game pause toggle; paused? ', gamePaused ? 'yes' : 'no');
-			}
-			else if(e.key == '.'){
-				// advance 1 frame, then pause
-				gamePaused = false;
-				debugFlailPaused = false;
-				mustImmediatePause = true;
-				console.log('advance 1 frame');
-			}
-			else if(e.key == 'o'){
-				// toggle debug id flailing paused
-				debugFlailPaused = !debugFlailPaused;
-				console.log('toggle debugId flailing pause; paused?', debugFlailPaused ? 'yes' : 'no');
-			}
-			else if(e.key == 'w'){
-				++pullStringDebuggerIndex;
-				console.log('pull string step:\n', pullStringDebugger.get_step_description(pullStringDebuggerIndex));
-			}
-			else if(e.key == 'q'){
-				--pullStringDebuggerIndex;
-				console.log('pull string step:\n', pullStringDebugger.get_step_description(pullStringDebuggerIndex));
-			}
-			else if(e.key == 'r'){
-				--pathfindingDebuggerIndex;
-				console.log('pathfinding step:\n', pathfindingDebugger.get_step_description(pathfindingDebuggerIndex));
-			}
-			else if(e.key == 't'){
-				++pathfindingDebuggerIndex;
-				console.log('pathfinding step:\n', pathfindingDebugger.get_step_description(pathfindingDebuggerIndex));
-			}
+		// recalculate origin when zooming/scrolling
+		window.addEventListener('scroll', function(e){
+			calculate_canvas_corner();
+		}.bind(this));
+		window.addEventListener('zoom', function(e){
+			calculate_canvas_corner();
 		}.bind(this));
 		
 		// load resources
-		swarm.load(wallsPolygons);
 	},
 	
-	// execute frame logic and render at a rate of 60 FPS
-	run: function(){
-		window.setInterval(this.gameLoop.bind(this), 1000/FPS);
-	},
-	
-	// game logic here
 	update: function(){
-		if (!debugFlailPaused)
+		// game logic here
+		for(let i = 0; i < NUM_TIMESTEPS_PER_FRAME; ++i)
 		{
-			++debugFrame;
-		}
-
-		if (!gamePaused)
-		{
-			if (mustImmediatePause)
+			for(let j = 0; j < states.length; ++j)
 			{
-				gamePaused = true;
-				debugFlailPaused = true;
+				let stateChain = states[j];
+				let prevState = stateChain[stateChain.length-1];
+				let g1 = get_gradient(prevState);
+				let g2 = get_gradient(prevState.sum(g1.mult(dt*0.5)));
+				let g3 = get_gradient(prevState.sum(g2.mult(dt*0.5)));
+				let g4 = get_gradient(prevState.sum(g3.mult(dt)));
+				stateChain.push(g1.sum(g2.mult(2)).sum(g3.mult(2)).sum(g4).mult(dt/6).sum(prevState));
+				if (stateChain.length > MEMORY_LEN)
+				{
+					stateChain.splice(0, stateChain.length-MEMORY_LEN);
+				}
 			}
-			
-			swarm.update(frame);
 		}
+		
+		const NUM_FRAMES_PER_CURRENT_TIME_UPDATE = 60;
+		const NUM_FRAMES_PER_SAVE = 600;
+		if (audio)
+		{
+			if (!audio.paused)
+			{
+				if (frame % NUM_FRAMES_PER_CURRENT_TIME_UPDATE == 0)
+				{
+					update_audio_timestamp();
+				}
+				if (frame % NUM_FRAMES_PER_SAVE == 0)
+				{
+					save_bookmarks_to_storage();
+				}
+			}
+		}
+		
 		++frame;
 	},
 
 	render: function(){
-		ctx.lineWidth = UNIVERSAL_LINE_WIDTH;
-		ctx.fillStyle = "#224466FF";
-		ctx.font = '20px courier new';
-		ctx.fillRect(0, 0, canvas.width, canvas.height);	// clear screen
+		// clear screen
+		ctx.fillStyle = "#401010FF";
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
 		
-		// render pikmin
-		swarm.render();
-
-		// render concave polygon
-		const POLYGON_EDGE_COLOR = '#00FF0040';
-		const POLYGON_FILL_COLOR = '#0000FF40';
-		const POINT_RADIUS = 3;
-		wallsPolygons.forEach(p => p.render(POLYGON_FILL_COLOR, POLYGON_EDGE_COLOR, POINT_RADIUS));
-		//wallsPolygons.forEach(p => p.render_debug_ids(POLYGON_EDGE_COLOR));
-		
-		//swarm.mesh.render_network('#FFAAAA80', '#FFFF8880', '#66FFFF80');
-		//swarm.mesh.render_network('#FFAAAA40', '#FFFF8840', '#66FFFF40');
-		
-		// render pull string debugger
-		pullStringDebugger.render_step(pullStringDebuggerIndex);
-		
-		// render path debugger
-		pathfindingDebugger.render_step(pathfindingDebuggerIndex);
+		const CENTER_X = canvas.width/2;
+		const CENTER_Y = canvas.height/2;
+		const SCALE = 4.5;
+		const DOT_WIDTH = 2;
+		for(let i = 0; i < states.length; ++i)
+		{
+			let stateChain = states[i];
+			for(let j = 0; j < stateChain.length; ++j)
+			{
+				let v = stateChain[j];
+				ctx.fillStyle = `${stateChain.rgb}${Math.floor(j/MEMORY_LEN*256).toString(16).padStart(2, '0')}`;
+				ctx.fillRect(CENTER_X + SCALE*v.x, CENTER_Y + SCALE*v.y, DOT_WIDTH, DOT_WIDTH);
+			}
+		}
 	},
 	
 	gameLoop: function(){
 		this.update();
 		this.render();
+	},
+		
+	run: function(){
+		// execute frame logic and render at a rate of 60 FPS
+		window.setInterval(this.gameLoop.bind(this), 1000/FPS);
 	},
 };
 
@@ -1898,6 +377,33 @@ function startGame(){
 	game.setup();
 	game.run();
 }
+
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
